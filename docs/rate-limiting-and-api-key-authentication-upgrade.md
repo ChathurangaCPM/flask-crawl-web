@@ -52,7 +52,7 @@ API_KEY=your-secure-api-key-here  # Generate with: python -c "import secrets; pr
 #### 3. **Generate Secure API Key**
 
 ```bash
-bashpython -c "import secrets; print(secrets.token_urlsafe(32))"
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
 ### 🔧 Configuration
