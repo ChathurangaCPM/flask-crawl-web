@@ -1,3 +1,5 @@
+# app/api/v1/crawl.py - Updated with conditional rate limiting
+
 from flask import request, jsonify, current_app
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -5,18 +7,80 @@ import asyncio
 import time
 import sys
 import traceback
+import os
+from functools import wraps
 from app.api.v1 import api_v1
 from app.services.crawler_service import CrawlerService
 from app.models.crawler_models import CrawlConfig
 from app.utils.validators import validate_crawl_request, validate_batch_request
 from app.utils.response_helpers import success_response, error_response
 
-# Initialize rate limiter
+# Custom key function that checks for API key
+def get_rate_limit_key():
+    """Get rate limit key based on API key or IP address"""
+    # Check if we're in development mode
+    if os.getenv('FLASK_ENV', 'production') == 'development':
+        return None  # No rate limiting in development
+    
+    # Check for API key in headers
+    api_key = request.headers.get('X-API-Key')
+    if api_key:
+        # Validate API key
+        valid_api_key = os.getenv('API_KEY', '')
+        if api_key == valid_api_key and valid_api_key:
+            return None  # No rate limiting for valid API key
+    
+    # Default to IP-based rate limiting
+    return get_remote_address()
+
+# Initialize rate limiter with custom key function
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=get_rate_limit_key,
     default_limits=["100 per hour", "20 per minute"],
     storage_uri="memory://",
+    enabled=os.getenv('FLASK_ENV', 'production') != 'development'  # Disable in development
 )
+
+# Custom decorator to handle rate limiting with better error messages
+def apply_rate_limit(limit_string):
+    """Apply rate limit only in production without valid API key"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Skip rate limiting in development
+            if os.getenv('FLASK_ENV', 'production') == 'development':
+                return f(*args, **kwargs)
+            
+            # Check for API key
+            api_key = request.headers.get('X-API-Key')
+            valid_api_key = os.getenv('API_KEY', '')
+            
+            if api_key and api_key == valid_api_key and valid_api_key:
+                # Valid API key - no rate limiting
+                return f(*args, **kwargs)
+            
+            # Apply rate limiting
+            return limiter.limit(limit_string)(f)(*args, **kwargs)
+        
+        return decorated_function
+    return decorator
+
+# Error handler for rate limit exceeded
+@limiter.request_filter
+def rate_limit_filter():
+    """Filter to check if rate limiting should be applied"""
+    # Don't rate limit in development
+    if os.getenv('FLASK_ENV', 'production') == 'development':
+        return True
+    
+    # Don't rate limit if valid API key is provided
+    api_key = request.headers.get('X-API-Key')
+    valid_api_key = os.getenv('API_KEY', '')
+    
+    if api_key and api_key == valid_api_key and valid_api_key:
+        return True
+    
+    return False
 
 def safe_async_run(coro, timeout=30):
     """Safely run async coroutine with proper event loop handling"""
@@ -37,7 +101,7 @@ def safe_async_run(coro, timeout=30):
         raise e
 
 @api_v1.route('/crawl', methods=['POST'])
-@limiter.limit("15 per minute")
+@apply_rate_limit("15 per minute")
 def crawl_url():
     """High-speed single URL crawling endpoint with robust error handling"""
     start_time = time.time()
@@ -102,7 +166,7 @@ def crawl_url():
         return error_response("Internal server error", 500)
 
 @api_v1.route('/crawl/fast', methods=['POST'])
-@limiter.limit("20 per minute")
+@apply_rate_limit("20 per minute")
 def crawl_url_ultra_fast():
     """Ultra-fast crawling with minimal processing"""
     start_time = time.time()
@@ -160,7 +224,7 @@ def crawl_url_ultra_fast():
         return error_response("Internal server error", 500)
 
 @api_v1.route('/crawl/batch', methods=['POST'])
-@limiter.limit("3 per minute")  # Very strict for batch
+@apply_rate_limit("3 per minute")  # Very strict for batch
 def batch_crawl():
     """High-speed batch URL crawling with concurrency"""
     start_time = time.time()
@@ -244,7 +308,7 @@ def batch_crawl():
         return error_response("Batch processing failed", 500)
 
 @api_v1.route('/crawl/<path:url>', methods=['GET'])
-@limiter.limit("30 per minute")
+@apply_rate_limit("30 per minute")
 def crawl_get_endpoint(url):
     """Lightning-fast GET endpoint"""
     start_time = time.time()
@@ -293,10 +357,20 @@ def crawl_get_endpoint(url):
 
 # Health check for debugging
 @api_v1.route('/crawl/test', methods=['GET'])
-@limiter.limit("60 per minute")
+@apply_rate_limit("60 per minute")
 def test_crawl():
     """Simple test endpoint"""
     try:
+        # Check current environment and API key status
+        is_development = os.getenv('FLASK_ENV', 'production') == 'development'
+        has_api_key = bool(request.headers.get('X-API-Key'))
+        api_key_valid = False
+        
+        if has_api_key:
+            provided_key = request.headers.get('X-API-Key')
+            valid_key = os.getenv('API_KEY', '')
+            api_key_valid = provided_key == valid_key and valid_key != ''
+        
         return success_response({
             "message": "Crawler service is ready",
             "endpoints": {
@@ -305,7 +379,29 @@ def test_crawl():
                 "batch": "POST /api/v1/crawl/batch",
                 "get": "GET /api/v1/crawl/<url>"
             },
-            "status": "healthy"
+            "status": "healthy",
+            "rate_limiting": {
+                "environment": os.getenv('FLASK_ENV', 'production'),
+                "is_development": is_development,
+                "rate_limit_active": not is_development and not api_key_valid,
+                "has_api_key": has_api_key,
+                "api_key_valid": api_key_valid
+            }
         })
     except Exception as e:
         return error_response(f"Test failed: {str(e)}", 500)
+
+# Add custom error handler for rate limit exceeded
+@api_v1.errorhandler(429)
+def rate_limit_handler(e):
+    """Custom handler for rate limit exceeded"""
+    return jsonify({
+        'success': False,
+        'error': 'Rate limit exceeded',
+        'message': 'Too many requests. Please try again later or use an API key for unlimited access.',
+        'details': {
+            'retry_after_seconds': 60,
+            'api_key_header': 'X-API-Key',
+            'documentation': '/api/v1/docs'
+        }
+    }), 429
