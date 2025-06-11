@@ -52,7 +52,7 @@ A production-ready, blazing-fast Flask API for web crawling with advanced featur
 
 1. **Clone and navigate:**
    ```bash
-   git clone <your-repo>
+   git clone https://github.com/ChathurangaCPM/flask-crawl-web.git
    cd web-crawler-api
    ```
 
