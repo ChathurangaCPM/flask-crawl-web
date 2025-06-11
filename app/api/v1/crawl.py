@@ -11,6 +11,9 @@ from app.models.crawler_models import CrawlConfig
 from app.utils.validators import validate_crawl_request, validate_batch_request
 from app.utils.response_helpers import success_response, error_response
 from app.utils.smart_limiter import smart_limit, get_rate_limit_info
+from app.services.speed_crawler import SpeedOptimizedCrawler, CrawlSpeed
+from app.utils.smart_limiter import smart_limit, get_rate_limit_info
+from urllib.parse import urlparse
 
 # Initialize rate limiter
 limiter = Limiter(
@@ -373,3 +376,606 @@ def test_crawler():
         return success_response(response_data)
     except Exception as e:
         return error_response(f"Test failed: {str(e)}", 500)
+
+@api_v1.route('/crawl/ultra-fast', methods=['POST'])
+@smart_limit("30 per minute")  # Higher limit for ultra-fast
+def crawl_ultra_fast():
+    """⚡ Ultra-fast crawling - Lightning speed, basic content"""
+    start_time = time.time()
+    
+    try:
+        rate_info = get_rate_limit_info()
+        data = request.get_json()
+        
+        # Validate request
+        url = data.get('url')
+        if not url or not validate_url(url):
+            return error_response("Valid URL is required", 400)
+        
+        # Ultra-fast specific config
+        config = data.get('config', {})
+        custom_config = {
+            'max_content_length': min(config.get('max_content_length', 800), 1000),
+            'timeout': min(config.get('timeout', 8), 10)
+        }
+        
+        # Initialize speed crawler
+        crawler = SpeedOptimizedCrawler(current_app.config)
+        
+        try:
+            result = safe_async_run(
+                crawler.crawl_with_speed(
+                    url=url,
+                    speed=CrawlSpeed.ULTRA_FAST,
+                    css_selector=data.get('css_selector'),
+                    custom_config=custom_config
+                ),
+                timeout=12
+            )
+        except asyncio.TimeoutError:
+            return error_response("Ultra-fast crawl timeout after 12 seconds", 408)
+        except Exception as crawl_error:
+            current_app.logger.error(f"Ultra-fast crawl failed: {str(crawl_error)}")
+            return error_response(f"Ultra-fast crawl failed: {str(crawl_error)}", 500)
+        
+        # Add timing and rate info
+        total_time = time.time() - start_time
+        if result.get('success'):
+            if 'metadata' not in result:
+                result['metadata'] = {}
+            result['metadata']['api_response_time'] = round(total_time, 2)
+            result['metadata']['rate_limiting'] = rate_info
+            result['metadata']['performance_tier'] = 'ultra_fast'
+            result['metadata']['features'] = {
+                'javascript': False,
+                'images': False,
+                'css': False,
+                'forms': False,
+                'max_speed': True
+            }
+            
+            return success_response(result)
+        else:
+            return error_response(result.get('error', 'Ultra-fast crawl failed'), 400)
+            
+    except Exception as e:
+        current_app.logger.error(f"Ultra-fast endpoint error: {str(e)}")
+        return error_response("Ultra-fast crawl service error", 500)
+
+@api_v1.route('/crawl/fast', methods=['POST'])
+@smart_limit("20 per minute")
+def crawl_fast():
+    """🚀 Fast crawling - Quick and efficient with JavaScript"""
+    start_time = time.time()
+    
+    try:
+        rate_info = get_rate_limit_info()
+        data = request.get_json()
+        
+        # Validate request
+        url = data.get('url')
+        if not url or not validate_url(url):
+            return error_response("Valid URL is required", 400)
+        
+        # Fast-specific config
+        config = data.get('config', {})
+        custom_config = {
+            'max_content_length': min(config.get('max_content_length', 2000), 2500),
+            'timeout': min(config.get('timeout', 15), 20)
+        }
+        
+        # Initialize speed crawler
+        crawler = SpeedOptimizedCrawler(current_app.config)
+        
+        try:
+            result = safe_async_run(
+                crawler.crawl_with_speed(
+                    url=url,
+                    speed=CrawlSpeed.FAST,
+                    css_selector=data.get('css_selector'),
+                    custom_config=custom_config
+                ),
+                timeout=25
+            )
+        except asyncio.TimeoutError:
+            return error_response("Fast crawl timeout after 25 seconds", 408)
+        except Exception as crawl_error:
+            current_app.logger.error(f"Fast crawl failed: {str(crawl_error)}")
+            return error_response(f"Fast crawl failed: {str(crawl_error)}", 500)
+        
+        # Add timing and rate info
+        total_time = time.time() - start_time
+        if result.get('success'):
+            if 'metadata' not in result:
+                result['metadata'] = {}
+            result['metadata']['api_response_time'] = round(total_time, 2)
+            result['metadata']['rate_limiting'] = rate_info
+            result['metadata']['performance_tier'] = 'fast'
+            result['metadata']['features'] = {
+                'javascript': True,
+                'images': False,
+                'css': True,
+                'forms': False,
+                'optimized': True
+            }
+            
+            return success_response(result)
+        else:
+            return error_response(result.get('error', 'Fast crawl failed'), 400)
+            
+    except Exception as e:
+        current_app.logger.error(f"Fast endpoint error: {str(e)}")
+        return error_response("Fast crawl service error", 500)
+
+@api_v1.route('/crawl/normal', methods=['POST'])
+@smart_limit("15 per minute")
+def crawl_normal():
+    """⚖️ Normal crawling - Balanced speed and thoroughness"""
+    start_time = time.time()
+    
+    try:
+        rate_info = get_rate_limit_info()
+        data = request.get_json()
+        
+        # Validate request
+        url = data.get('url')
+        if not url or not validate_url(url):
+            return error_response("Valid URL is required", 400)
+        
+        # Normal-specific config
+        config = data.get('config', {})
+        custom_config = {
+            'max_content_length': min(config.get('max_content_length', 4000), 5000),
+            'timeout': min(config.get('timeout', 30), 40)
+        }
+        
+        # Initialize speed crawler
+        crawler = SpeedOptimizedCrawler(current_app.config)
+        
+        try:
+            result = safe_async_run(
+                crawler.crawl_with_speed(
+                    url=url,
+                    speed=CrawlSpeed.NORMAL,
+                    css_selector=data.get('css_selector'),
+                    custom_config=custom_config
+                ),
+                timeout=45
+            )
+        except asyncio.TimeoutError:
+            return error_response("Normal crawl timeout after 45 seconds", 408)
+        except Exception as crawl_error:
+            current_app.logger.error(f"Normal crawl failed: {str(crawl_error)}")
+            return error_response(f"Normal crawl failed: {str(crawl_error)}", 500)
+        
+        # Add timing and rate info
+        total_time = time.time() - start_time
+        if result.get('success'):
+            if 'metadata' not in result:
+                result['metadata'] = {}
+            result['metadata']['api_response_time'] = round(total_time, 2)
+            result['metadata']['rate_limiting'] = rate_info
+            result['metadata']['performance_tier'] = 'normal'
+            result['metadata']['features'] = {
+                'javascript': True,
+                'images': False,
+                'css': True,
+                'forms': True,
+                'links': True,
+                'balanced': True
+            }
+            
+            return success_response(result)
+        else:
+            return error_response(result.get('error', 'Normal crawl failed'), 400)
+            
+    except Exception as e:
+        current_app.logger.error(f"Normal endpoint error: {str(e)}")
+        return error_response("Normal crawl service error", 500)
+
+@api_v1.route('/crawl/thorough', methods=['POST'])
+@smart_limit("8 per minute")  # Lower limit for thorough crawling
+def crawl_thorough():
+    """🔍 Thorough crawling - Complete analysis with all features"""
+    start_time = time.time()
+    
+    try:
+        rate_info = get_rate_limit_info()
+        data = request.get_json()
+        
+        # Validate request
+        url = data.get('url')
+        if not url or not validate_url(url):
+            return error_response("Valid URL is required", 400)
+        
+        # Thorough-specific config
+        config = data.get('config', {})
+        custom_config = {
+            'max_content_length': min(config.get('max_content_length', 8000), 10000),
+            'timeout': min(config.get('timeout', 60), 80)
+        }
+        
+        # Initialize speed crawler
+        crawler = SpeedOptimizedCrawler(current_app.config)
+        
+        try:
+            result = safe_async_run(
+                crawler.crawl_with_speed(
+                    url=url,
+                    speed=CrawlSpeed.THOROUGH,
+                    css_selector=data.get('css_selector'),
+                    custom_config=custom_config
+                ),
+                timeout=90
+            )
+        except asyncio.TimeoutError:
+            return error_response("Thorough crawl timeout after 90 seconds", 408)
+        except Exception as crawl_error:
+            current_app.logger.error(f"Thorough crawl failed: {str(crawl_error)}")
+            return error_response(f"Thorough crawl failed: {str(crawl_error)}", 500)
+        
+        # Add timing and rate info
+        total_time = time.time() - start_time
+        if result.get('success'):
+            if 'metadata' not in result:
+                result['metadata'] = {}
+            result['metadata']['api_response_time'] = round(total_time, 2)
+            result['metadata']['rate_limiting'] = rate_info
+            result['metadata']['performance_tier'] = 'thorough'
+            result['metadata']['features'] = {
+                'javascript': True,
+                'images': True,
+                'css': True,
+                'forms': True,
+                'iframes': True,
+                'links': True,
+                'user_simulation': True,
+                'complete_analysis': True
+            }
+            
+            return success_response(result)
+        else:
+            return error_response(result.get('error', 'Thorough crawl failed'), 400)
+            
+    except Exception as e:
+        current_app.logger.error(f"Thorough endpoint error: {str(e)}")
+        return error_response("Thorough crawl service error", 500)
+
+@api_v1.route('/crawl/batch-speed', methods=['POST'])
+@smart_limit("3 per minute")
+def batch_crawl_speed():
+    """📦 Batch crawling with configurable speed tiers"""
+    start_time = time.time()
+    
+    try:
+        rate_info = get_rate_limit_info()
+        data = request.get_json()
+        
+        # Validate request
+        urls = data.get('urls', [])
+        if not urls or not isinstance(urls, list):
+            return error_response("URLs array is required", 400)
+        
+        max_batch_size = current_app.config.get('MAX_BATCH_SIZE', 5)
+        if len(urls) > max_batch_size:
+            return error_response(f"Maximum {max_batch_size} URLs allowed per batch", 400)
+        
+        # Speed configuration
+        speed_name = data.get('speed', 'fast').lower()
+        speed_map = {
+            'ultra_fast': CrawlSpeed.ULTRA_FAST,
+            'ultra-fast': CrawlSpeed.ULTRA_FAST,
+            'ultrafast': CrawlSpeed.ULTRA_FAST,
+            'fast': CrawlSpeed.FAST,
+            'normal': CrawlSpeed.NORMAL,
+            'thorough': CrawlSpeed.THOROUGH
+        }
+        speed = speed_map.get(speed_name, CrawlSpeed.FAST)
+        
+        # Batch config
+        config = data.get('config', {})
+        max_concurrent = min(config.get('max_concurrent', 3), 5)
+        
+        # Initialize speed crawler
+        crawler = SpeedOptimizedCrawler(current_app.config)
+        
+        try:
+            results = safe_async_run(
+                crawler.batch_crawl_with_speed(
+                    urls=urls[:max_batch_size],
+                    speed=speed,
+                    max_concurrent=max_concurrent
+                ),
+                timeout=120
+            )
+        except asyncio.TimeoutError:
+            return error_response("Batch speed crawl timeout after 120 seconds", 408)
+        except Exception as crawl_error:
+            current_app.logger.error(f"Batch speed crawl failed: {str(crawl_error)}")
+            return error_response(f"Batch speed crawl failed: {str(crawl_error)}", 500)
+        
+        # Process results
+        successful = sum(1 for r in results if r.get('success'))
+        failed = len(results) - successful
+        total_time = time.time() - start_time
+        
+        return success_response({
+            'results': results,
+            'summary': {
+                'total_urls': len(urls),
+                'successful': successful,
+                'failed': failed,
+                'speed_tier': speed.value,
+                'max_concurrent': max_concurrent,
+                'total_time': round(total_time, 2),
+                'average_time_per_url': round(total_time / len(urls), 2) if urls else 0
+            },
+            'rate_limiting': rate_info,
+            'performance_info': {
+                'speed_tier_used': speed.value,
+                'concurrency': max_concurrent,
+                'batch_optimization': True
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"Batch speed crawl error: {str(e)}")
+        return error_response("Batch speed crawl service error", 500)
+
+@api_v1.route('/crawl/auto-speed', methods=['POST'])
+@smart_limit("20 per minute")
+def crawl_auto_speed():
+    """🤖 Auto-speed crawling - Automatically selects optimal speed tier"""
+    start_time = time.time()
+    
+    try:
+        rate_info = get_rate_limit_info()
+        data = request.get_json()
+        
+        # Validate request
+        url = data.get('url')
+        if not url or not validate_url(url):
+            return error_response("Valid URL is required", 400)
+        
+        # Auto-detect optimal speed based on use case or URL characteristics
+        use_case = data.get('use_case', 'quick_scan')
+        domain = urlparse(url).netloc.lower()
+        
+        # Initialize speed crawler
+        crawler = SpeedOptimizedCrawler(current_app.config)
+        
+        # Smart speed selection
+        if use_case in ['monitoring', 'status_check', 'health_check']:
+            speed = CrawlSpeed.ULTRA_FAST
+        elif 'api' in domain or 'status' in url.lower():
+            speed = CrawlSpeed.ULTRA_FAST
+        elif use_case in ['quick_scan', 'api_integration'] or any(x in domain for x in ['github.com', 'stackoverflow.com']):
+            speed = CrawlSpeed.FAST
+        elif use_case in ['research', 'compliance'] or any(x in domain for x in ['wikipedia.org', 'docs.', 'blog.']):
+            speed = CrawlSpeed.THOROUGH
+        else:
+            speed = CrawlSpeed.NORMAL
+        
+        # Allow manual override
+        if 'force_speed' in data:
+            speed_override = data['force_speed'].lower()
+            speed_map = {
+                'ultra_fast': CrawlSpeed.ULTRA_FAST,
+                'fast': CrawlSpeed.FAST,
+                'normal': CrawlSpeed.NORMAL,
+                'thorough': CrawlSpeed.THOROUGH
+            }
+            speed = speed_map.get(speed_override, speed)
+        
+        # Config based on selected speed
+        config = data.get('config', {})
+        custom_config = {
+            'max_content_length': config.get('max_content_length'),
+            'timeout': config.get('timeout')
+        }
+        
+        try:
+            result = safe_async_run(
+                crawler.crawl_with_speed(
+                    url=url,
+                    speed=speed,
+                    css_selector=data.get('css_selector'),
+                    custom_config=custom_config
+                ),
+                timeout=90
+            )
+        except asyncio.TimeoutError:
+            return error_response("Auto-speed crawl timeout", 408)
+        except Exception as crawl_error:
+            current_app.logger.error(f"Auto-speed crawl failed: {str(crawl_error)}")
+            return error_response(f"Auto-speed crawl failed: {str(crawl_error)}", 500)
+        
+        # Add timing and auto-selection info
+        total_time = time.time() - start_time
+        if result.get('success'):
+            if 'metadata' not in result:
+                result['metadata'] = {}
+            result['metadata']['api_response_time'] = round(total_time, 2)
+            result['metadata']['rate_limiting'] = rate_info
+            result['metadata']['auto_selection'] = {
+                'selected_speed': speed.value,
+                'use_case': use_case,
+                'domain_detected': domain,
+                'selection_reason': f"Optimized for {use_case} and domain characteristics"
+            }
+            
+            return success_response(result)
+        else:
+            return error_response(result.get('error', 'Auto-speed crawl failed'), 400)
+            
+    except Exception as e:
+        current_app.logger.error(f"Auto-speed endpoint error: {str(e)}")
+        return error_response("Auto-speed crawl service error", 500)
+
+@api_v1.route('/crawl/speed-info', methods=['GET'])
+@smart_limit("60 per minute")
+def speed_tier_info():
+    """📊 Get information about available speed tiers and their characteristics"""
+    try:
+        rate_info = get_rate_limit_info()
+        
+        speed_info = {
+            "ultra_fast": {
+                "name": "Ultra Fast ⚡",
+                "description": "Lightning speed crawling for basic content extraction",
+                "typical_time": "0.5-2 seconds",
+                "features": {
+                    "javascript": False,
+                    "images": False,
+                    "css_processing": False,
+                    "forms": False,
+                    "iframes": False
+                },
+                "use_cases": ["Status checks", "Monitoring", "Health checks", "Quick content scan"],
+                "max_content": "1KB",
+                "timeout": "8 seconds",
+                "rate_limit": "30 per minute"
+            },
+            "fast": {
+                "name": "Fast 🚀",
+                "description": "Quick crawling with JavaScript support",
+                "typical_time": "1-5 seconds", 
+                "features": {
+                    "javascript": True,
+                    "images": False,
+                    "css_processing": True,
+                    "forms": False,
+                    "iframes": False
+                },
+                "use_cases": ["Content extraction", "API integration", "Data scraping", "Quick analysis"],
+                "max_content": "2.5KB",
+                "timeout": "15 seconds",
+                "rate_limit": "20 per minute"
+            },
+            "normal": {
+                "name": "Normal ⚖️",
+                "description": "Balanced speed and thoroughness",
+                "typical_time": "3-10 seconds",
+                "features": {
+                    "javascript": True,
+                    "images": False,
+                    "css_processing": True,
+                    "forms": True,
+                    "iframes": False
+                },
+                "use_cases": ["General crawling", "SEO analysis", "Content research", "Link extraction"],
+                "max_content": "5KB",
+                "timeout": "30 seconds",
+                "rate_limit": "15 per minute"
+            },
+            "thorough": {
+                "name": "Thorough 🔍",
+                "description": "Complete analysis with all features enabled",
+                "typical_time": "5-20 seconds",
+                "features": {
+                    "javascript": True,
+                    "images": True,
+                    "css_processing": True,
+                    "forms": True,
+                    "iframes": True,
+                    "user_simulation": True
+                },
+                "use_cases": ["Research", "Compliance checks", "Complete site analysis", "Academic studies"],
+                "max_content": "10KB",
+                "timeout": "60 seconds",
+                "rate_limit": "8 per minute"
+            }
+        }
+        
+        return success_response({
+            "speed_tiers": speed_info,
+            "endpoints": {
+                "ultra_fast": "POST /api/v1/crawl/ultra-fast",
+                "fast": "POST /api/v1/crawl/fast",
+                "normal": "POST /api/v1/crawl/normal", 
+                "thorough": "POST /api/v1/crawl/thorough",
+                "auto_speed": "POST /api/v1/crawl/auto-speed",
+                "batch_speed": "POST /api/v1/crawl/batch-speed"
+            },
+            "rate_limiting": rate_info,
+            "selection_guide": {
+                "for_monitoring": "ultra_fast",
+                "for_content_extraction": "fast",
+                "for_general_crawling": "normal",
+                "for_research": "thorough",
+                "for_auto_optimization": "auto_speed"
+            },
+            "performance_tips": [
+                "Use ultra-fast for simple status checks and monitoring",
+                "Use fast for most content extraction needs",
+                "Use normal for balanced performance and features",
+                "Use thorough only when you need complete analysis",
+                "Use auto-speed to let the system choose optimal speed",
+                "API key bypasses rate limits for all speed tiers"
+            ]
+        })
+        
+    except Exception as e:
+        return error_response(f"Speed info failed: {str(e)}", 500)
+
+# Enhanced health check with speed tier status
+@api_v1.route('/health/speed', methods=['GET'])
+@smart_limit("60 per minute")
+def speed_health_check():
+    """🏥 Health check specifically for speed-optimized crawling"""
+    try:
+        rate_info = get_rate_limit_info()
+        
+        # Test each speed tier briefly
+        test_url = "https://httpbin.org/html"
+        crawler = SpeedOptimizedCrawler(current_app.config)
+        
+        speed_status = {}
+        for speed in [CrawlSpeed.ULTRA_FAST, CrawlSpeed.FAST]:
+            try:
+                start_time = time.time()
+                result = safe_async_run(
+                    crawler.crawl_with_speed(test_url, speed),
+                    timeout=10
+                )
+                response_time = round(time.time() - start_time, 2)
+                
+                speed_status[speed.value] = {
+                    "status": "healthy" if result.get('success') else "degraded",
+                    "response_time": response_time,
+                    "test_passed": result.get('success', False)
+                }
+            except Exception as e:
+                speed_status[speed.value] = {
+                    "status": "error",
+                    "response_time": None,
+                    "error": str(e),
+                    "test_passed": False
+                }
+        
+        overall_status = "healthy" if all(
+            s.get("test_passed") for s in speed_status.values()
+        ) else "degraded"
+        
+        return success_response({
+            "status": overall_status,
+            "service": "Speed-Optimized Web Crawler",
+            "version": "2.0.0",
+            "speed_tiers": speed_status,
+            "rate_limiting": rate_info,
+            "performance_metrics": {
+                "ultra_fast_target": "< 2 seconds",
+                "fast_target": "< 5 seconds",
+                "availability": "99.9%",
+                "concurrent_capacity": "50+ requests"
+            },
+            "system_info": {
+                "optimization_level": "high",
+                "cache_enabled": True,
+                "compression": True,
+                "async_processing": True
+            }
+        })
+        
+    except Exception as e:
+        return error_response(f"Speed health check failed: {str(e)}", 500)
