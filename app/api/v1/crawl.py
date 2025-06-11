@@ -10,6 +10,7 @@ from app.services.crawler_service import CrawlerService
 from app.models.crawler_models import CrawlConfig
 from app.utils.validators import validate_crawl_request, validate_batch_request
 from app.utils.response_helpers import success_response, error_response
+from app.utils.smart_limiter import smart_limit, get_rate_limit_info
 
 # Initialize rate limiter
 limiter = Limiter(
@@ -35,14 +36,16 @@ def safe_async_run(coro, timeout=30):
     except Exception as e:
         current_app.logger.error(f"Async execution error: {str(e)}")
         raise e
-
 @api_v1.route('/crawl', methods=['POST'])
-@limiter.limit("15 per minute")
+@smart_limit("15 per minute")  # Only applies in production with no API key
 def crawl_url():
-    """High-speed single URL crawling endpoint with robust error handling"""
+    """High-speed single URL crawling endpoint with smart rate limiting"""
     start_time = time.time()
     
     try:
+        # Add rate limit info to response metadata
+        rate_info = get_rate_limit_info()
+        
         data = request.get_json()
         
         # Validate request
@@ -58,13 +61,13 @@ def crawl_url():
             word_count_threshold=max(1, config_data.get('word_count_threshold', 5)),
             excluded_tags=config_data.get('excluded_tags', ['form', 'header', 'nav', 'footer']),
             exclude_external_links=config_data.get('exclude_external_links', True),
-            process_iframes=False,  # Always False for stability
+            process_iframes=False,
             remove_overlay_elements=config_data.get('remove_overlay_elements', True),
             use_cache=config_data.get('use_cache', True),
-            max_content_length=min(config_data.get('max_content_length', 5000), 20000),  # Cap at 20k
+            max_content_length=min(config_data.get('max_content_length', 5000), 20000),
             
             # Speed optimization options
-            speed_mode='fast',  # Always use fast mode
+            speed_mode='fast',
             skip_images=config_data.get('skip_images', True),
             skip_links=config_data.get('skip_links', False),
             minimal_processing=config_data.get('minimal_processing', False)
@@ -83,14 +86,14 @@ def crawl_url():
             return error_response("Request timeout after 30 seconds", 408)
         except Exception as crawl_error:
             current_app.logger.error(f"Crawl execution failed: {str(crawl_error)}")
-            current_app.logger.error(f"Traceback: {traceback.format_exc()}")
             return error_response(f"Crawl failed: {str(crawl_error)}", 500)
         
-        # Add timing information
+        # Add timing information and rate limit info
         total_time = time.time() - start_time
         if result and result.success:
             if hasattr(result, 'metadata') and result.metadata:
                 result.metadata['api_response_time'] = round(total_time, 2)
+                result.metadata['rate_limiting'] = rate_info
             return success_response(result.to_dict())
         else:
             error_msg = result.error if result else "Unknown error occurred"
@@ -98,16 +101,16 @@ def crawl_url():
             
     except Exception as e:
         current_app.logger.error(f"Crawl endpoint error: {str(e)}")
-        current_app.logger.error(f"Full traceback: {traceback.format_exc()}")
         return error_response("Internal server error", 500)
 
 @api_v1.route('/crawl/fast', methods=['POST'])
-@limiter.limit("20 per minute")
+@smart_limit("20 per minute")
 def crawl_url_ultra_fast():
     """Ultra-fast crawling with minimal processing"""
     start_time = time.time()
     
     try:
+        rate_info = get_rate_limit_info()
         data = request.get_json()
         
         is_valid, error_msg = validate_crawl_request(data)
@@ -119,13 +122,13 @@ def crawl_url_ultra_fast():
         
         # Ultra-fast configuration
         crawl_config = CrawlConfig(
-            word_count_threshold=3,  # Very low threshold
+            word_count_threshold=3,
             excluded_tags=['form', 'header', 'nav', 'footer', 'script', 'style', 'noscript'],
             exclude_external_links=True,
             process_iframes=False,
             remove_overlay_elements=True,
             use_cache=True,
-            max_content_length=min(config_data.get('max_content_length', 2000), 5000),  # Cap at 5k
+            max_content_length=min(config_data.get('max_content_length', 2000), 5000),
             speed_mode='fast',
             skip_images=True,
             skip_links=True,
@@ -137,7 +140,7 @@ def crawl_url_ultra_fast():
         try:
             result = safe_async_run(
                 crawler_service.crawl_single_url_fast(url, crawl_config),
-                timeout=15  # Shorter timeout for fast endpoint
+                timeout=15
             )
         except asyncio.TimeoutError:
             return error_response("Fast crawl timeout after 15 seconds", 408)
@@ -150,6 +153,7 @@ def crawl_url_ultra_fast():
             if hasattr(result, 'metadata') and result.metadata:
                 result.metadata['api_response_time'] = round(total_time, 2)
                 result.metadata['mode'] = 'ultra_fast'
+                result.metadata['rate_limiting'] = rate_info
             return success_response(result.to_dict())
         else:
             error_msg = result.error if result else "Fast crawl failed"
@@ -160,20 +164,21 @@ def crawl_url_ultra_fast():
         return error_response("Internal server error", 500)
 
 @api_v1.route('/crawl/batch', methods=['POST'])
-@limiter.limit("3 per minute")  # Very strict for batch
+@smart_limit("3 per minute")  # Very strict for batch
 def batch_crawl():
     """High-speed batch URL crawling with concurrency"""
     start_time = time.time()
     
     try:
+        rate_info = get_rate_limit_info()
         data = request.get_json()
         
-        max_batch_size = min(current_app.config.get('MAX_BATCH_SIZE', 5), 5)  # Cap at 5
+        max_batch_size = min(current_app.config.get('MAX_BATCH_SIZE', 5), 5)
         is_valid, error_msg = validate_batch_request(data, max_batch_size)
         if not is_valid:
             return error_response(error_msg, 400)
         
-        urls = data['urls'][:max_batch_size]  # Enforce limit
+        urls = data['urls'][:max_batch_size]
         config_data = data.get('config', {})
         
         # Batch-optimized configuration
@@ -184,9 +189,9 @@ def batch_crawl():
             process_iframes=False,
             remove_overlay_elements=True,
             use_cache=True,
-            max_content_length=min(config_data.get('max_content_length', 2000), 3000),  # Smaller for batch
+            max_content_length=min(config_data.get('max_content_length', 2000), 3000),
             speed_mode='fast',
-            max_concurrent=min(config_data.get('max_concurrent', 2), 3),  # Very conservative
+            max_concurrent=min(config_data.get('max_concurrent', 2), 3),
             skip_images=True,
             skip_links=config_data.get('skip_links', True)
         )
@@ -196,7 +201,7 @@ def batch_crawl():
         try:
             results = safe_async_run(
                 crawler_service.crawl_multiple_urls(urls, crawl_config),
-                timeout=60  # Longer timeout for batch
+                timeout=60
             )
         except asyncio.TimeoutError:
             return error_response("Batch crawl timeout after 60 seconds", 408)
@@ -235,27 +240,29 @@ def batch_crawl():
             'failed': failed,
             'total_time': round(total_time, 2),
             'average_time_per_url': round(total_time / len(urls), 2) if urls else 0,
-            'mode': 'concurrent_batch'
+            'mode': 'concurrent_batch',
+            'rate_limiting': rate_info
         })
         
     except Exception as e:
         current_app.logger.error(f"Batch crawl error: {str(e)}")
-        current_app.logger.error(f"Full traceback: {traceback.format_exc()}")
         return error_response("Batch processing failed", 500)
 
 @api_v1.route('/crawl/<path:url>', methods=['GET'])
-@limiter.limit("30 per minute")
+@smart_limit("30 per minute")
 def crawl_get_endpoint(url):
     """Lightning-fast GET endpoint"""
     start_time = time.time()
     
     try:
+        rate_info = get_rate_limit_info()
+        
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
 
         # Ultra-minimal config for GET requests
         crawl_config = CrawlConfig(
-            max_content_length=1500,  # Very small for GET
+            max_content_length=1500,
             speed_mode='fast',
             skip_images=True,
             skip_links=True,
@@ -269,7 +276,7 @@ def crawl_get_endpoint(url):
         try:
             result = safe_async_run(
                 crawler_service.crawl_single_url_fast(url, crawl_config),
-                timeout=10  # Very short timeout for GET
+                timeout=10
             )
         except asyncio.TimeoutError:
             return error_response("GET crawl timeout after 10 seconds", 408)
@@ -282,6 +289,7 @@ def crawl_get_endpoint(url):
             if hasattr(result, 'metadata') and result.metadata:
                 result.metadata['api_response_time'] = round(total_time, 2)
                 result.metadata['mode'] = 'get_fast'
+                result.metadata['rate_limiting'] = rate_info
             return success_response(result.to_dict())
         else:
             error_msg = result.error if result else "GET crawl failed"
@@ -291,21 +299,77 @@ def crawl_get_endpoint(url):
         current_app.logger.error(f"GET crawl error: {str(e)}")
         return error_response("GET request failed", 500)
 
-# Health check for debugging
-@api_v1.route('/crawl/test', methods=['GET'])
-@limiter.limit("60 per minute")
-def test_crawl():
-    """Simple test endpoint"""
+# Enhanced health check with rate limiting info
+@api_v1.route('/health', methods=['GET'])
+@smart_limit("60 per minute")
+def health_check():
+    """Enhanced health check with rate limiting information"""
     try:
+        rate_info = get_rate_limit_info()
+        
         return success_response({
+            "status": "healthy",
+            "service": "Web Crawler API",
+            "version": "1.0.0",
+            "rate_limiting": rate_info,
+            "endpoints": {
+                "single": "POST /api/v1/crawl",
+                "fast": "POST /api/v1/crawl/fast", 
+                "batch": "POST /api/v1/crawl/batch",
+                "get": "GET /api/v1/crawl/<url>",
+                "health": "GET /api/v1/health"
+            },
+            "api_key_info": {
+                "bypass_available": True,
+                "development_keys": ["dev-api-key-123", "development-unlimited-access"] if rate_info.get("mode") == "development" else None,
+                "header_formats": ["X-API-Key", "X-Api-Key", "Api-Key"],
+                "query_param": "api_key"
+            }
+        })
+    except Exception as e:
+        return error_response(f"Health check failed: {str(e)}", 500)
+
+# Enhanced test endpoint
+@api_v1.route('/test', methods=['GET'])
+@smart_limit("60 per minute")
+def test_crawler():
+    """Enhanced test endpoint with rate limiting examples"""
+    try:
+        rate_info = get_rate_limit_info()
+        
+        response_data = {
             "message": "Crawler service is ready",
+            "rate_limiting": rate_info,
             "endpoints": {
                 "single": "POST /api/v1/crawl",
                 "fast": "POST /api/v1/crawl/fast", 
                 "batch": "POST /api/v1/crawl/batch",
                 "get": "GET /api/v1/crawl/<url>"
             },
+            "examples": {
+                "basic_crawl": {
+                    "url": "POST /api/v1/crawl",
+                    "payload": {
+                        "url": "https://example.com",
+                        "config": {"max_content_length": 2000}
+                    }
+                },
+                "with_api_key": {
+                    "headers": {"X-API-Key": "your-api-key"},
+                    "note": "Bypasses rate limits"
+                }
+            },
             "status": "healthy"
-        })
+        }
+        
+        # Add development-specific info
+        if rate_info.get("mode") == "development":
+            response_data["development_info"] = {
+                "rate_limiting": "disabled",
+                "test_api_keys": ["dev-api-key-123", "development-unlimited-access"],
+                "generate_key": "GET /dev/generate-api-key"
+            }
+        
+        return success_response(response_data)
     except Exception as e:
         return error_response(f"Test failed: {str(e)}", 500)
