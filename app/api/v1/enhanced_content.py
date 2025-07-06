@@ -50,7 +50,7 @@ def safe_async_run(coro, timeout=30):
 @apply_rate_limit("15 per minute")
 def extract_content_with_selectors():
     """
-    Extract content from specific div elements using CSS selectors
+    Extract content from specific div elements using CSS selectors - WITH DEDUPLICATION
     
     Request body:
     {
@@ -95,6 +95,12 @@ def extract_content_with_selectors():
         if len(exclude_selectors) > 5:
             return error_response("Maximum 5 exclude selectors allowed", 400)
         
+        # Log the request for debugging
+        current_app.logger.info(f"Selective content extraction request:")
+        current_app.logger.info(f"  URL: {url}")
+        current_app.logger.info(f"  Selectors: {custom_selectors}")
+        current_app.logger.info(f"  Exclude: {exclude_selectors}")
+        
         # Initialize enhanced crawler service
         crawler_service = EnhancedContentOnlyCrawlerService(current_app.config)
         
@@ -113,15 +119,37 @@ def extract_content_with_selectors():
             current_app.logger.error(f"Traceback: {traceback.format_exc()}")
             return error_response(f"Selective content extraction failed: {str(crawl_error)}", 500)
         
-        # Add timing information
+        # Add timing information and enhanced metadata
         total_time = time.time() - start_time
         if result and result.success:
             if hasattr(result, 'metadata') and result.metadata:
                 result.metadata['api_response_time'] = round(total_time, 2)
-                result.metadata['endpoint'] = 'selective_content'
+                result.metadata['endpoint'] = 'selective_content_deduplicated'
+                
+                # Add deduplication statistics
+                content = result.content
+                if content:
+                    # Calculate basic duplication metrics
+                    words = content.split()
+                    unique_words = set(word.lower() for word in words if len(word) > 3)
+                    
+                    result.metadata['content_analysis'] = {
+                        'total_words': len(words),
+                        'unique_words': len(unique_words),
+                        'vocabulary_ratio': round(len(unique_words) / max(len(words), 1), 3),
+                        'content_length_after_deduplication': len(content)
+                    }
+            
+            # Log successful extraction
+            current_app.logger.info(f"Selective extraction successful:")
+            current_app.logger.info(f"  Content length: {len(result.content)}")
+            current_app.logger.info(f"  Sections found: {result.metadata.get('total_sections', 0)}")
+            current_app.logger.info(f"  Deduplication applied: {result.metadata.get('deduplication_applied', False)}")
+            
             return success_response(result.to_dict())
         else:
             error_msg = result.error if result else "Selective content extraction failed"
+            current_app.logger.error(f"Extraction failed: {error_msg}")
             return error_response(error_msg, 400)
             
     except Exception as e:
@@ -133,13 +161,13 @@ def extract_content_with_selectors():
 @apply_rate_limit("3 per minute")
 def batch_extract_content_with_selectors():
     """
-    Batch extract content using custom selectors
+    Batch extract content using custom selectors with deduplication
     
     Request body:
     {
         "urls": ["https://example1.com", "https://example2.com"],
         "config": {
-            "selectors": [".main-content", "#article-body"],
+            "selectors": [".content", "article"],
             "exclude_selectors": [".ads"],
             "max_content_length": 3000,
             "max_concurrent": 2
@@ -192,11 +220,18 @@ def batch_extract_content_with_selectors():
             result_dicts = []
             successful = 0
             failed = 0
+            total_content_length = 0
             
             for result in results:
                 try:
                     result_dict = result.to_dict() if result else {"success": False, "error": "No result"}
+                    
+                    # Add content analysis for successful results
+                    if result and result.success:
+                        total_content_length += len(result.content)
+                        
                     result_dicts.append(result_dict)
+                    
                     if result and result.success:
                         successful += 1
                     else:
@@ -208,6 +243,7 @@ def batch_extract_content_with_selectors():
             result_dicts = []
             successful = 0
             failed = len(urls)
+            total_content_length = 0
         
         total_time = time.time() - start_time
         
@@ -218,14 +254,19 @@ def batch_extract_content_with_selectors():
             'failed': failed,
             'total_time': round(total_time, 2),
             'average_time_per_url': round(total_time / len(urls), 2) if urls else 0,
-            'mode': 'selective_content_batch',
+            'mode': 'selective_content_batch_deduplicated',
             'selectors_used': custom_selectors,
             'exclude_selectors_used': exclude_selectors,
+            'batch_statistics': {
+                'total_content_extracted': total_content_length,
+                'average_content_per_url': round(total_content_length / max(successful, 1), 0)
+            },
             'features': {
                 'custom_selectors': True,
                 'exclude_selectors': True,
                 'clean_text_only': True,
-                'section_based_extraction': True
+                'section_based_extraction': True,
+                'content_deduplication': True
             }
         })
         
@@ -286,7 +327,7 @@ def extract_content_selective_get(url):
         if result and result.success:
             if hasattr(result, 'metadata') and result.metadata:
                 result.metadata['api_response_time'] = round(total_time, 2)
-                result.metadata['endpoint'] = 'selective_content_get'
+                result.metadata['endpoint'] = 'selective_content_get_deduplicated'
             return success_response(result.to_dict())
         else:
             error_msg = result.error if result else "GET selective content extraction failed"
@@ -340,7 +381,7 @@ def analyze_page_structure():
             if not result.success:
                 return error_response(result.error, 400)
             
-            # Analyze the structure (this would require additional implementation)
+            # Analyze the structure
             analysis = {
                 "url": url,
                 "title": result.title,
@@ -348,24 +389,34 @@ def analyze_page_structure():
                 "word_count": result.word_count,
                 "suggested_selectors": [],
                 "common_content_areas": [],
-                "exclude_suggestions": []
+                "exclude_suggestions": [],
+                "deduplication_recommendations": {
+                    "single_selector_recommended": True,
+                    "reason": "Using multiple selectors may cause content duplication",
+                    "best_practices": [
+                        "Start with one specific selector",
+                        "Use exclude_selectors to remove unwanted content",
+                        "Test selectors in browser dev tools first"
+                    ]
+                }
             }
             
-            # Add some basic suggestions based on common patterns
+            # Add suggestions based on common patterns
             if suggest_selectors:
                 analysis["suggested_selectors"] = [
-                    {"selector": "main", "description": "Main content area"},
-                    {"selector": "article", "description": "Article content"},
-                    {"selector": ".content", "description": "Content class"},
-                    {"selector": "#main-content", "description": "Main content ID"},
-                    {"selector": ".post-content", "description": "Post content area"}
+                    {"selector": "main", "description": "Main content area", "priority": "high"},
+                    {"selector": "article", "description": "Article content", "priority": "high"},
+                    {"selector": ".content", "description": "Content class", "priority": "medium"},
+                    {"selector": "#main-content", "description": "Main content ID", "priority": "medium"},
+                    {"selector": ".post-content", "description": "Post content area", "priority": "medium"}
                 ][:max_suggestions]
                 
                 analysis["exclude_suggestions"] = [
                     {"selector": "nav", "description": "Navigation menus"},
                     {"selector": ".sidebar", "description": "Sidebar content"},
                     {"selector": ".advertisement", "description": "Advertisement blocks"},
-                    {"selector": "footer", "description": "Footer content"}
+                    {"selector": "footer", "description": "Footer content"},
+                    {"selector": ".comments", "description": "Comment sections"}
                 ]
             
             total_time = time.time() - start_time
@@ -374,6 +425,11 @@ def analyze_page_structure():
             return success_response({
                 "analysis": analysis,
                 "extraction_example": result.to_dict() if find_main_content else None,
+                "deduplication_info": {
+                    "why_deduplication_matters": "Multiple selectors can extract overlapping content",
+                    "how_it_works": "The API automatically removes duplicate content blocks",
+                    "best_selector_strategy": "Use one primary selector with exclude_selectors for precision"
+                },
                 "next_steps": {
                     "test_selectors": "Use POST /api/v1/content/selective with suggested selectors",
                     "batch_extract": "Use POST /api/v1/content/selective/batch for multiple URLs",
@@ -394,14 +450,15 @@ def analyze_page_structure():
 @api_v1.route('/content/selective/test', methods=['GET'])
 @apply_rate_limit("60 per minute")
 def test_selective_extraction():
-    """Test endpoint for selective content extraction with documentation"""
+    """Test endpoint for selective content extraction with enhanced documentation"""
     try:
         return success_response({
-            "message": "Selective content extraction service is ready",
+            "message": "Selective content extraction service is ready (WITH DEDUPLICATION)",
+            "version": "2.0 - Enhanced with Content Deduplication",
             "endpoints": {
                 "selective": {
                     "url": "POST /api/v1/content/selective",
-                    "description": "Extract content using custom CSS selectors",
+                    "description": "Extract content using custom CSS selectors with automatic deduplication",
                     "example": {
                         "url": "https://example.com",
                         "config": {
@@ -410,22 +467,21 @@ def test_selective_extraction():
                             "max_content_length": 5000,
                             "return_sections": True
                         }
-                    }
+                    },
+                    "deduplication_features": [
+                        "Removes duplicate content blocks within same selector",
+                        "Eliminates overlapping content from multiple selectors",
+                        "Prioritizes more specific selectors over general ones",
+                        "Removes duplicate sentences and paragraphs"
+                    ]
                 },
                 "selective_batch": {
                     "url": "POST /api/v1/content/selective/batch",
-                    "description": "Batch extract content using custom selectors",
-                    "example": {
-                        "urls": ["https://example1.com", "https://example2.com"],
-                        "config": {
-                            "selectors": [".content", "article"],
-                            "max_concurrent": 2
-                        }
-                    }
+                    "description": "Batch extract content using custom selectors with deduplication"
                 },
                 "selective_get": {
                     "url": "GET /api/v1/content/selective/<url>",
-                    "description": "Quick selective extraction via GET",
+                    "description": "Quick selective extraction via GET with deduplication",
                     "example": "GET /api/v1/content/selective/example.com?selectors=.content,.main&exclude=.ads&length=2000"
                 },
                 "analyze": {
@@ -433,13 +489,40 @@ def test_selective_extraction():
                     "description": "Analyze page structure and get selector suggestions"
                 }
             },
+            "deduplication_improvements": {
+                "what_was_fixed": [
+                    "Content extracted multiple times from nested elements",
+                    "Same content appearing from different selectors",
+                    "Duplicate sentences within extracted content",
+                    "Repeated phrases and paragraphs"
+                ],
+                "how_it_works": [
+                    "1. Extract content from each selector individually",
+                    "2. Remove duplicates within each selector's content",
+                    "3. Compare content across selectors and remove overlaps",
+                    "4. Prioritize more specific selectors",
+                    "5. Final deduplication pass on combined content"
+                ],
+                "benefits": [
+                    "Cleaner, more readable content",
+                    "Reduced response size",
+                    "Better content quality",
+                    "More efficient processing"
+                ]
+            },
             "css_selectors_guide": {
                 "by_class": ".classname (e.g., .main-content)",
                 "by_id": "#idname (e.g., #article-body)",
                 "by_tag": "tagname (e.g., article, main)",
                 "by_attribute": "[attribute='value'] (e.g., [role='main'])",
                 "descendant": "parent child (e.g., .content p)",
-                "multiple": "Use array: ['.content', 'article', 'main']"
+                "multiple": "Use array: ['.content', 'article', 'main']",
+                "best_practices": [
+                    "Start with one specific selector",
+                    "Use browser dev tools to test selectors",
+                    "Prefer IDs and classes over generic tags",
+                    "Use exclude_selectors to remove unwanted content"
+                ]
             },
             "common_selectors": {
                 "main_content": ["main", "article", ".content", "#main-content", ".post-content"],
@@ -448,14 +531,32 @@ def test_selective_extraction():
                 "blogs": [".entry-content", ".post-body", ".article-content"],
                 "documentation": [".content", ".documentation", ".docs-content"]
             },
-            "advanced_features": {
-                "return_sections": "Get individual sections for each selector",
-                "exclude_selectors": "Remove unwanted elements before extraction",
-                "max_content_length": "Control output size (100-25000 chars)",
-                "batch_processing": "Process multiple URLs with same selectors"
+            "testing_your_fix": {
+                "before_fix": "Content was duplicated multiple times",
+                "after_fix": "Content should appear only once",
+                "test_steps": [
+                    "1. Send POST request to /api/v1/content/selective",
+                    "2. Check content field for duplications",
+                    "3. Verify metadata.deduplication_applied is true if multiple selectors used",
+                    "4. Compare content length before/after fix"
+                ]
+            },
+            "infinitude_integration": {
+                "next_js_example": {
+                    "description": "Ready for your Next.js 14 app router projects",
+                    "api_route": "app/api/crawl/selective/route.js",
+                    "component": "components/ContentExtractor.jsx",
+                    "hook": "hooks/useWebCrawler.js"
+                },
+                "saas_features": [
+                    "Batch processing for multiple URLs",
+                    "Content deduplication for cleaner results",
+                    "Selective extraction for targeted content",
+                    "Rate limiting with API key bypass"
+                ]
             },
             "status": "healthy",
-            "service": "Selective Content Extraction API"
+            "service": "Selective Content Extraction API with Advanced Deduplication"
         })
     except Exception as e:
         return error_response(f"Selective extraction test failed: {str(e)}", 500)

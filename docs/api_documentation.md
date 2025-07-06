@@ -701,14 +701,14 @@ X-API-Key: your-api-key-here
 **Request Body:**
 ```json
 {
-  "site_type": "adaderana_news",
+  "site_type": "yournews_site",
   "url": "https://yournewssite.lk/hot-news/",
   "limit": 5
 }
 ```
 
 **Available site_types:**
-- `adaderana_news`: News site configuration
+- `yournews_site`: News site configuration
 - `generic_news`: Generic news articles
 - `generic_products`: E-commerce products
 - `generic_search`: Search results

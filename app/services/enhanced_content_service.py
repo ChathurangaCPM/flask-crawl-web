@@ -1,12 +1,12 @@
-# app/services/enhanced_content_service.py
 import asyncio
 import logging
 import random
 import time
 import re
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Set
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
+import difflib
 
 try:
     from crawl4ai import AsyncWebCrawler
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class EnhancedContentExtractor:
-    """Extract clean text content from HTML with custom selector support"""
+    """Extract clean text content from HTML with custom selector support and deduplication"""
     
     def __init__(self):
         # Default tags to completely remove
@@ -51,10 +51,162 @@ class EnhancedContentExtractor:
             '#content', '#main-content', '#article-content'
         ]
     
+    def _calculate_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity between two text strings"""
+        if not text1 or not text2:
+            return 0.0
+        
+        # Use difflib to calculate similarity ratio
+        return difflib.SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+    
+    def _is_content_duplicate(self, content: str, existing_contents: List[str], threshold: float = 0.85) -> bool:
+        """Check if content is duplicate of existing content"""
+        if not content.strip():
+            return True
+        
+        # Normalize content for comparison
+        normalized_content = re.sub(r'\s+', ' ', content.strip().lower())
+        
+        for existing in existing_contents:
+            if not existing.strip():
+                continue
+                
+            normalized_existing = re.sub(r'\s+', ' ', existing.strip().lower())
+            
+            # Check exact match
+            if normalized_content == normalized_existing:
+                return True
+            
+            # Check if one is contained in the other (for nested elements)
+            if (normalized_content in normalized_existing and 
+                len(normalized_content) > len(normalized_existing) * 0.5):
+                return True
+            
+            if (normalized_existing in normalized_content and 
+                len(normalized_existing) > len(normalized_content) * 0.5):
+                return True
+            
+            # Check similarity ratio
+            similarity = self._calculate_similarity(normalized_content, normalized_existing)
+            if similarity > threshold:
+                return True
+        
+        return False
+    
+    def _remove_nested_content(self, extracted_sections: Dict[str, Dict]) -> Dict[str, Dict]:
+        """Remove content that is nested within other extracted content"""
+        # Sort sections by content length (longest first)
+        sections_by_length = sorted(
+            extracted_sections.items(), 
+            key=lambda x: len(x[1]['content']), 
+            reverse=True
+        )
+        
+        filtered_sections = {}
+        used_contents = []
+        
+        for section_key, section_data in sections_by_length:
+            content = section_data['content']
+            
+            # Check if this content is already covered by a larger section
+            if not self._is_content_duplicate(content, used_contents, threshold=0.75):
+                filtered_sections[section_key] = section_data
+                used_contents.append(content)
+            else:
+                logger.info(f"Removed duplicate/nested content from selector: {section_data['selector']}")
+        
+        return filtered_sections
+    
+    def _prioritize_selectors(self, extracted_sections: Dict[str, Dict]) -> Dict[str, Dict]:
+        """Prioritize more specific selectors over general ones"""
+        # Priority order: ID selectors > class selectors > element selectors
+        def get_selector_priority(selector: str) -> int:
+            if '#' in selector:  # ID selector
+                return 3
+            elif '.' in selector:  # Class selector
+                return 2
+            elif '[' in selector:  # Attribute selector
+                return 2
+            else:  # Element selector
+                return 1
+        
+        # Sort by priority (highest first), then by content length
+        prioritized_sections = sorted(
+            extracted_sections.items(),
+            key=lambda x: (
+                get_selector_priority(x[1]['selector']),
+                len(x[1]['content'])
+            ),
+            reverse=True
+        )
+        
+        return dict(prioritized_sections)
+    
+    def _deduplicate_content_blocks(self, content: str) -> str:
+        """Remove duplicate paragraphs/blocks within content"""
+        if not content:
+            return content
+        
+        # First, split by common separators
+        blocks = []
+        
+        # Try splitting by double newlines first
+        initial_blocks = [block.strip() for block in content.split('\n\n') if block.strip()]
+        
+        if len(initial_blocks) <= 1:
+            # If no double newlines, try single newlines
+            initial_blocks = [block.strip() for block in content.split('\n') if block.strip()]
+        
+        if len(initial_blocks) <= 1:
+            # If still no separation, try sentences
+            initial_blocks = [block.strip() for block in content.split('.') if block.strip() and len(block.strip()) > 20]
+        
+        # Remove duplicates while preserving order
+        seen_blocks = set()
+        unique_blocks = []
+        
+        for block in initial_blocks:
+            # Normalize block for comparison
+            normalized_block = re.sub(r'\s+', ' ', block.lower().strip())
+            
+            # Skip very short blocks
+            if len(normalized_block) < 15:
+                continue
+            
+            # Check for exact duplicates
+            if normalized_block not in seen_blocks:
+                # Check for substring duplicates (one block contained in another)
+                is_duplicate = False
+                for existing_block in seen_blocks:
+                    # If this block is largely contained in an existing block, skip it
+                    if (normalized_block in existing_block and 
+                        len(normalized_block) > len(existing_block) * 0.7):
+                        is_duplicate = True
+                        break
+                    # If an existing block is largely contained in this block, remove the existing one
+                    elif (existing_block in normalized_block and 
+                          len(existing_block) > len(normalized_block) * 0.7):
+                        # Remove the shorter block from seen_blocks and unique_blocks
+                        if existing_block in seen_blocks:
+                            seen_blocks.remove(existing_block)
+                        # Find and remove from unique_blocks
+                        unique_blocks = [b for b in unique_blocks 
+                                       if re.sub(r'\s+', ' ', b.lower().strip()) != existing_block]
+                
+                if not is_duplicate:
+                    unique_blocks.append(block)
+                    seen_blocks.add(normalized_block)
+        
+        # Join blocks back together
+        if len(unique_blocks) > 1:
+            return '\n\n'.join(unique_blocks)
+        else:
+            return '\n\n'.join(unique_blocks) if unique_blocks else content
+    
     def clean_html_with_selectors(self, html_content: str, custom_selectors: Optional[List[str]] = None, 
                                 exclude_selectors: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Clean HTML and extract content using custom selectors
+        Clean HTML and extract content using custom selectors with deduplication
         
         Args:
             html_content: Raw HTML content
@@ -62,7 +214,7 @@ class EnhancedContentExtractor:
             exclude_selectors: List of CSS selectors to exclude from extraction
             
         Returns:
-            Dict with extracted content and metadata
+            Dict with extracted content and metadata (deduplicated)
         """
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -107,11 +259,12 @@ class EnhancedContentExtractor:
                                     selector_content.append(text)
                             
                             if selector_content:
+                                combined_selector_content = " ".join(selector_content)
                                 extracted_content[f"selector_{i+1}_{selector}"] = {
                                     "selector": selector,
-                                    "content": " ".join(selector_content),
+                                    "content": combined_selector_content,
                                     "element_count": len(elements),
-                                    "word_count": len(" ".join(selector_content).split())
+                                    "word_count": len(combined_selector_content.split())
                                 }
                     except Exception as e:
                         logger.warning(f"Invalid selector '{selector}': {str(e)}")
@@ -139,19 +292,44 @@ class EnhancedContentExtractor:
                         "word_count": len(fallback_content.split())
                     }
             
-            # Combine all extracted content
+            # DEDUPLICATION PROCESS
+            logger.info(f"Before deduplication: {len(extracted_content)} sections")
+            
+            # Step 1: Prioritize selectors
+            if len(extracted_content) > 1:
+                extracted_content = self._prioritize_selectors(extracted_content)
+            
+            # Step 2: Remove nested/duplicate content
+            if len(extracted_content) > 1:
+                extracted_content = self._remove_nested_content(extracted_content)
+            
+            logger.info(f"After deduplication: {len(extracted_content)} sections")
+            
+            # Combine remaining unique content
             combined_content = ""
             metadata = {
                 "selectors_used": list(extracted_content.keys()),
                 "total_sections": len(extracted_content),
-                "extraction_method": "custom_selectors" if custom_selectors else "default"
+                "extraction_method": "custom_selectors_deduplicated" if custom_selectors else "default",
+                "deduplication_applied": len(custom_selectors or []) > 1 if custom_selectors else False
             }
             
             if extracted_content:
-                combined_content = "\n\n".join([
-                    f"[{data['selector']}]\n{data['content']}" 
-                    for data in extracted_content.values()
-                ])
+                if len(extracted_content) == 1:
+                    # Single section - apply internal deduplication
+                    section_data = list(extracted_content.values())[0]
+                    combined_content = self._deduplicate_content_blocks(section_data['content'])
+                else:
+                    # Multiple unique sections - combine with clear separation
+                    content_parts = []
+                    for section_key, data in extracted_content.items():
+                        # Apply deduplication to each section individually
+                        deduplicated_section_content = self._deduplicate_content_blocks(data['content'])
+                        content_parts.append(f"[{data['selector']}]\n{deduplicated_section_content}")
+                    combined_content = '\n\n'.join(content_parts)
+                
+                # Final deduplication pass for the entire combined content
+                combined_content = self._deduplicate_content_blocks(combined_content)
             
             return {
                 "content": combined_content.strip(),
@@ -184,23 +362,69 @@ class EnhancedContentExtractor:
         return self._extract_text_from_element(content_soup)
     
     def _extract_text_from_element(self, element) -> str:
-        """Extract clean text from a BeautifulSoup element"""
-        text_parts = []
+        """Extract clean text from a BeautifulSoup element without duplication"""
+        if not element:
+            return ""
         
-        for child in element.descendants:
-            if child.name in self.block_tags and child.get_text(strip=True):
-                text_parts.append(child.get_text(strip=True))
-            elif child.string and child.string.strip():
-                parent_tag = child.parent.name if child.parent else None
-                if parent_tag not in self.remove_tags:
-                    text_parts.append(child.string.strip())
+        # Create a copy to avoid modifying the original
+        element_copy = element.__copy__()
         
-        # Join text parts and clean up
-        content = ' '.join(text_parts)
-        content = re.sub(r'\s+', ' ', content)
-        content = re.sub(r'\n\s*\n', '\n\n', content)
+        # Remove unwanted nested elements
+        for tag in element_copy(self.remove_tags):
+            tag.decompose()
         
-        return content.strip()
+        # Remove images but keep alt text if available
+        for img in element_copy.find_all('img'):
+            alt_text = img.get('alt', '').strip()
+            if alt_text:
+                img.replace_with(f"[Image: {alt_text}]")
+            else:
+                img.decompose()
+        
+        # Convert links to text but keep link text
+        for link in element_copy.find_all('a'):
+            link_text = link.get_text(strip=True)
+            if link_text:
+                link.replace_with(link_text)
+            else:
+                link.unwrap()
+        
+        # Get all text content with proper spacing
+        text = element_copy.get_text(separator=' ', strip=True)
+        
+        # Clean up whitespace and normalize
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        
+        # Remove any remaining duplicate sentences/paragraphs
+        text = self._remove_duplicate_sentences(text)
+        
+        return text.strip()
+    
+    def _remove_duplicate_sentences(self, text: str) -> str:
+        """Remove duplicate sentences within the text"""
+        if not text or len(text) < 50:
+            return text
+        
+        # Split into sentences (basic approach)
+        sentences = []
+        current_sentence = ""
+        
+        for char in text:
+            current_sentence += char
+            if char in '.!?' and len(current_sentence.strip()) > 10:
+                sentence = current_sentence.strip()
+                if sentence and sentence not in sentences:
+                    sentences.append(sentence)
+                current_sentence = ""
+        
+        # Add remaining text if any
+        if current_sentence.strip():
+            remaining = current_sentence.strip()
+            if remaining not in sentences:
+                sentences.append(remaining)
+        
+        return ' '.join(sentences)
     
     def _simple_text_extraction(self, html_content: str) -> str:
         """Fallback simple text extraction using regex"""
@@ -219,7 +443,7 @@ class EnhancedContentExtractor:
 
 
 class EnhancedContentOnlyCrawlerService:
-    """Enhanced crawler service with custom selector support"""
+    """Enhanced crawler service with custom selector support and deduplication"""
     
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
@@ -243,7 +467,7 @@ class EnhancedContentOnlyCrawlerService:
                                         max_length: Optional[int] = None,
                                         return_sections: bool = False) -> CrawlResult:
         """
-        Crawl URL and extract content using custom CSS selectors
+        Crawl URL and extract content using custom CSS selectors with deduplication
         
         Args:
             url: URL to crawl
@@ -341,7 +565,7 @@ class EnhancedContentOnlyCrawlerService:
                                       max_length: Optional[int], 
                                       return_sections: bool,
                                       crawl_time: float) -> CrawlResult:
-        """Process crawl result with custom selectors"""
+        """Process crawl result with custom selectors and deduplication"""
         try:
             # Check if crawl was successful
             if hasattr(result, 'success') and not result.success:
@@ -364,7 +588,7 @@ class EnhancedContentOnlyCrawlerService:
                     error="No HTML content found"
                 )
             
-            # Extract content using custom selectors
+            # Extract content using custom selectors with deduplication
             extraction_result = self.extractor.clean_html_with_selectors(
                 html_content, custom_selectors, exclude_selectors
             )
@@ -398,9 +622,14 @@ class EnhancedContentOnlyCrawlerService:
                 'status_code': getattr(result, 'status_code', 200),
                 'content_length': len(clean_content),
                 'original_html_length': len(html_content),
-                'extraction_mode': 'custom_selectors',
+                'extraction_mode': 'custom_selectors_deduplicated',
                 'selectors_used': custom_selectors or [],
                 'exclude_selectors_used': exclude_selectors or [],
+                'deduplication_stats': {
+                    'selectors_provided': len(custom_selectors) if custom_selectors else 0,
+                    'unique_sections_found': len(sections),
+                    'deduplication_applied': extraction_metadata.get('deduplication_applied', False)
+                },
                 **extraction_metadata
             }
             
@@ -433,7 +662,7 @@ class EnhancedContentOnlyCrawlerService:
                                           exclude_selectors: Optional[List[str]] = None,
                                           max_length: Optional[int] = None,
                                           max_concurrent: int = 3) -> List[CrawlResult]:
-        """Crawl multiple URLs with custom selectors"""
+        """Crawl multiple URLs with custom selectors and deduplication"""
         max_concurrent = min(max_concurrent, 5)
         semaphore = asyncio.Semaphore(max_concurrent)
         

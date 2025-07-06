@@ -1,4 +1,4 @@
-# app/api/v1/array_content.py
+# app/api/v1/array_content.py - FIXED VERSION WITH DEDUPLICATION
 from flask import request, jsonify, current_app
 import asyncio
 import time
@@ -50,7 +50,7 @@ def safe_async_run(coro, timeout=30):
 @apply_rate_limit("10 per minute")
 def extract_array_content():
     """
-    Extract repeated elements as arrays from specific selectors
+    Extract repeated elements as arrays from specific selectors - WITH DEDUPLICATION
     
     Perfect for news items, product lists, articles, etc.
     
@@ -108,6 +108,12 @@ def extract_array_content():
         if format_output not in ['structured', 'flat', 'summary']:
             return error_response("format must be one of: structured, flat, summary", 400)
         
+        # Log the request for debugging
+        current_app.logger.info(f"Array content extraction request:")
+        current_app.logger.info(f"  URL: {url}")
+        current_app.logger.info(f"  Array selectors: {list(array_selectors.keys())}")
+        current_app.logger.info(f"  Format: {format_output}")
+        
         # Initialize array-based crawler service
         crawler_service = ArrayBasedCrawlerService(current_app.config)
         
@@ -126,12 +132,36 @@ def extract_array_content():
             current_app.logger.error(f"Traceback: {traceback.format_exc()}")
             return error_response(f"Array content extraction failed: {str(crawl_error)}", 500)
         
-        # Add timing information
+        # Add timing information and enhanced metadata
         total_time = time.time() - start_time
         if result and result.success:
             if hasattr(result, 'metadata') and result.metadata:
                 result.metadata['api_response_time'] = round(total_time, 2)
-                result.metadata['endpoint'] = 'array_content'
+                result.metadata['endpoint'] = 'array_content_deduplicated'
+                
+                # Add enhanced deduplication statistics
+                arrays = result.metadata.get('arrays', {})
+                if arrays:
+                    total_items_before = sum(
+                        len(data.get('items', [])) for data in arrays.values()
+                    )
+                    total_items_after = sum(
+                        data.get('count', 0) for data in arrays.values()
+                    )
+                    
+                    result.metadata['deduplication_stats'] = {
+                        'total_arrays': len(arrays),
+                        'total_items_before_dedup': total_items_before,
+                        'total_items_after_dedup': total_items_after,
+                        'items_removed': max(0, total_items_before - total_items_after),
+                        'deduplication_ratio': round(
+                            (max(0, total_items_before - total_items_after) / max(total_items_before, 1)) * 100, 1
+                        ),
+                        'arrays_with_deduplication': [
+                            name for name, data in arrays.items() 
+                            if data.get('deduplication_applied', False)
+                        ]
+                    }
             
             # Create enhanced response with array data easily accessible
             response_data = result.to_dict()
@@ -146,14 +176,24 @@ def extract_array_content():
                     arrays_summary[name] = {
                         'count': array_data['count'],
                         'selector': array_data['selector'],
-                        'items': [item['main_content'][:100] + "..." if len(item['main_content']) > 100 else item['main_content'] 
-                                for item in array_data['items'][:3]]  # First 3 items preview
+                        'deduplication_applied': array_data.get('deduplication_applied', False),
+                        'items_preview': [
+                            item['main_content'][:100] + "..." if len(item['main_content']) > 100 else item['main_content'] 
+                            for item in array_data['items'][:3]  # First 3 items preview
+                        ]
                     }
                 response_data['arrays_preview'] = arrays_summary
+            
+            # Log successful extraction
+            current_app.logger.info(f"Array extraction successful:")
+            current_app.logger.info(f"  Arrays found: {len(result.metadata.get('arrays', {}))}")
+            current_app.logger.info(f"  Total unique items: {result.metadata.get('content_quality', {}).get('total_unique_items', 0)}")
+            current_app.logger.info(f"  Deduplication applied: {result.metadata.get('content_quality', {}).get('deduplication_applied', False)}")
             
             return success_response(response_data)
         else:
             error_msg = result.error if result else "Array content extraction failed"
+            current_app.logger.error(f"Array extraction failed: {error_msg}")
             return error_response(error_msg, 400)
             
     except Exception as e:
@@ -165,7 +205,7 @@ def extract_array_content():
 @apply_rate_limit("2 per minute")
 def batch_extract_array_content():
     """
-    Batch extract array content from multiple URLs
+    Batch extract array content from multiple URLs with deduplication
     
     Request body:
     {
@@ -226,23 +266,30 @@ def batch_extract_array_content():
             current_app.logger.error(f"Batch array content extraction failed: {str(crawl_error)}")
             return error_response(f"Batch array content extraction failed: {str(crawl_error)}", 500)
         
-        # Process results
+        # Process results with enhanced deduplication statistics
         if results:
             result_dicts = []
             successful = 0
             failed = 0
             total_items = 0
+            total_deduplication_savings = 0
             
             for result in results:
                 try:
                     result_dict = result.to_dict() if result else {"success": False, "error": "No result"}
                     
-                    # Add array data to response
+                    # Add array data to response and calculate deduplication stats
                     if result and result.success and hasattr(result, 'metadata') and 'arrays' in result.metadata:
                         result_dict['arrays'] = result.metadata['arrays']
+                        
                         # Count total items for this result
                         for array_data in result.metadata['arrays'].values():
                             total_items += array_data.get('count', 0)
+                        
+                        # Track deduplication savings
+                        dedup_stats = result.metadata.get('deduplication_stats', {})
+                        items_removed = dedup_stats.get('items_removed', 0)
+                        total_deduplication_savings += items_removed
                     
                     result_dicts.append(result_dict)
                     
@@ -259,6 +306,7 @@ def batch_extract_array_content():
             successful = 0
             failed = len(urls)
             total_items = 0
+            total_deduplication_savings = 0
         
         total_time = time.time() - start_time
         
@@ -270,13 +318,20 @@ def batch_extract_array_content():
             'total_items_extracted': total_items,
             'total_time': round(total_time, 2),
             'average_time_per_url': round(total_time / len(urls), 2) if urls else 0,
-            'mode': 'array_content_batch',
+            'mode': 'array_content_batch_deduplicated',
             'array_selectors_used': list(array_selectors.keys()),
             'format_used': format_output,
+            'batch_deduplication_stats': {
+                'total_duplicate_items_removed': total_deduplication_savings,
+                'deduplication_applied': total_deduplication_savings > 0,
+                'efficiency_improvement': f"{total_deduplication_savings} duplicate items removed"
+            },
             'features': {
                 'array_based_extraction': True,
                 'sub_selector_support': True,
-                'repeated_elements_as_arrays': True
+                'repeated_elements_as_arrays': True,
+                'advanced_deduplication': True,
+                'content_quality_enhancement': True
             }
         })
         
@@ -289,7 +344,7 @@ def batch_extract_array_content():
 @apply_rate_limit("20 per minute")
 def extract_array_content_get(url):
     """
-    Quick array extraction via GET with query parameters
+    Quick array extraction via GET with query parameters and deduplication
     
     Query parameters:
     - selector: CSS selector for repeated elements (e.g., ?selector=.news-story)
@@ -359,11 +414,21 @@ def extract_array_content_get(url):
         if result and result.success:
             if hasattr(result, 'metadata') and result.metadata:
                 result.metadata['api_response_time'] = round(total_time, 2)
-                result.metadata['endpoint'] = 'array_content_get'
+                result.metadata['endpoint'] = 'array_content_get_deduplicated'
             
             response_data = result.to_dict()
             if 'arrays' in result.metadata:
                 response_data['arrays'] = result.metadata['arrays']
+                
+                # Add GET-specific deduplication info
+                arrays_data = result.metadata['arrays'].get('items', {})
+                if arrays_data:
+                    response_data['get_extraction_info'] = {
+                        'selector_used': main_selector,
+                        'items_found': arrays_data.get('count', 0),
+                        'deduplication_applied': arrays_data.get('deduplication_applied', False),
+                        'sub_selectors_used': arrays_data.get('sub_selectors_used', [])
+                    }
             
             return success_response(response_data)
         else:
@@ -377,28 +442,58 @@ def extract_array_content_get(url):
 @api_v1.route('/content/array/test', methods=['GET'])
 @apply_rate_limit("60 per minute")
 def test_array_extraction():
-    """Test endpoint for array-based extraction with examples"""
+    """Test endpoint for array-based extraction with deduplication examples"""
     try:
         return success_response({
-            "message": "Array-based content extraction service is ready",
-            "description": "Extract repeated elements (like news items, products, articles) as structured arrays",
+            "message": "Array-based content extraction service is ready (WITH DEDUPLICATION)",
+            "version": "2.0 - Enhanced with Advanced Deduplication",
+            "description": "Extract repeated elements (like news items, products, articles) as structured arrays with automatic deduplication",
             "endpoints": {
                 "array": {
                     "url": "POST /api/v1/content/array",
-                    "description": "Extract repeated elements as arrays with sub-selectors",
-                    "perfect_for": ["News lists", "Product listings", "Article feeds", "Social media posts"]
+                    "description": "Extract repeated elements as arrays with sub-selectors and deduplication",
+                    "perfect_for": ["News lists", "Product listings", "Article feeds", "Social media posts", "Search results"],
+                    "deduplication_features": [
+                        "Removes duplicate items within arrays",
+                        "Eliminates repeated content in sub-selectors",
+                        "Prevents duplicate sentences within items",
+                        "Maintains content quality and uniqueness"
+                    ]
                 },
                 "array_batch": {
                     "url": "POST /api/v1/content/array/batch",
-                    "description": "Batch extract arrays from multiple URLs"
+                    "description": "Batch extract arrays from multiple URLs with deduplication"
                 },
                 "array_get": {
                     "url": "GET /api/v1/content/array/<url>",
-                    "description": "Quick array extraction via GET parameters"
+                    "description": "Quick array extraction via GET parameters with deduplication"
                 }
             },
+            "deduplication_improvements": {
+                "what_was_fixed": [
+                    "Duplicate items in arrays from similar content",
+                    "Repeated content in main_content field",
+                    "Overlapping text from sub-selectors",
+                    "Same sentences appearing multiple times",
+                    "Nested element content duplication"
+                ],
+                "how_it_works": [
+                    "1. Extract content from each array element individually",
+                    "2. Remove duplicate sentences within each item",
+                    "3. Compare items across the array and remove duplicates",
+                    "4. Clean up sub-selector content to avoid overlaps",
+                    "5. Provide deduplication statistics in response"
+                ],
+                "benefits": [
+                    "Higher quality content arrays",
+                    "Reduced response size",
+                    "Better user experience",
+                    "More accurate item counts",
+                    "Cleaner data for processing"
+                ]
+            },
             "example_use_cases": {
-                "adaderana_news": {
+                "yournews_site": {
                     "url": "https://yournewssite.lk/hot-news/",
                     "config": {
                         "array_selectors": {
@@ -415,10 +510,11 @@ def test_array_extraction():
                         },
                         "exclude_selectors": [".comments script"],
                         "format": "structured"
-                    }
+                    },
+                    "expected_improvement": "Duplicate news items automatically removed"
                 },
                 "product_listings": {
-                    "description": "E-commerce product extraction",
+                    "description": "E-commerce product extraction with deduplication",
                     "config": {
                         "array_selectors": {
                             "products": {
@@ -431,10 +527,11 @@ def test_array_extraction():
                                 }
                             }
                         }
-                    }
+                    },
+                    "expected_improvement": "Duplicate products filtered out automatically"
                 },
                 "social_media_posts": {
-                    "description": "Social media feed extraction",
+                    "description": "Social media feed extraction with deduplication",
                     "config": {
                         "array_selectors": {
                             "posts": {
@@ -447,43 +544,9 @@ def test_array_extraction():
                                 }
                             }
                         }
-                    }
-                },
-                "search_results": {
-                    "description": "Search results extraction",
-                    "config": {
-                        "array_selectors": {
-                            "results": {
-                                "selector": ".search-result",
-                                "sub_selectors": {
-                                    "title": "h3 a",
-                                    "snippet": ".result-snippet",
-                                    "url": "h3 a",
-                                    "source": ".result-source"
-                                }
-                            }
-                        }
-                    }
+                    },
+                    "expected_improvement": "Duplicate or similar posts removed"
                 }
-            },
-            "advanced_config": {
-                "array_selectors": {
-                    "selector_name": {
-                        "selector": "CSS selector for repeated elements",
-                        "sub_selectors": {
-                            "field_name": "CSS selector within each element",
-                            "another_field": "Another CSS selector"
-                        },
-                        "limit": "Maximum number of items to extract"
-                    }
-                },
-                "exclude_selectors": ["Array of selectors to exclude"],
-                "format": "structured | flat | summary"
-            },
-            "output_formats": {
-                "structured": "Organized sections with sub-selector data",
-                "flat": "Simple list of main content from all items",
-                "summary": "Count and selector information only"
             },
             "response_structure": {
                 "arrays": {
@@ -492,31 +555,53 @@ def test_array_extraction():
                         "items": [
                             {
                                 "index": 0,
-                                "main_content": "Main text content",
+                                "main_content": "Unique main text content",
                                 "title": "Extracted title",
                                 "summary": "Extracted summary",
                                 "word_count": 25,
                                 "char_count": 150
                             }
                         ],
-                        "count": "Number of items found"
+                        "count": "Number of unique items found",
+                        "deduplication_applied": "Boolean indicating if duplicates were removed"
                     }
+                },
+                "deduplication_stats": {
+                    "total_items_before_dedup": "Original item count",
+                    "total_items_after_dedup": "Final unique item count",
+                    "items_removed": "Number of duplicates removed",
+                    "deduplication_ratio": "Percentage of duplicates removed"
                 }
             },
-            "get_endpoint_examples": {
-                "simple": "GET /api/v1/content/array/adaderana.lk/hot-news?selector=.news-story&limit=5",
-                "with_sub_selectors": "GET /api/v1/content/array/example.com?selector=.article&title=h2&summary=.excerpt&limit=10",
-                "with_exclusions": "GET /api/v1/content/array/site.com?selector=.item&exclude=.ads,.sidebar&format=flat"
+            "testing_deduplication": {
+                "before_fix": "Arrays contained duplicate items and repeated content",
+                "after_fix": "Only unique items with clean content",
+                "test_indicators": [
+                    "Check 'deduplication_applied' flag in array data",
+                    "Compare 'count' vs original element count",
+                    "Look for 'deduplication_stats' in metadata",
+                    "Verify no repeated sentences in main_content"
+                ]
             },
-            "tips": {
-                "performance": "Use limit parameter to control extraction size",
-                "accuracy": "Test selectors on browser dev tools first",
-                "sub_selectors": "Use sub_selectors for structured data extraction",
-                "exclusions": "Use exclude_selectors to remove unwanted content",
-                "format": "Use 'flat' format for simple text lists, 'structured' for detailed data"
+            "infinitude_integration": {
+                "next_js_example": {
+                    "description": "Perfect for your Next.js 14 SAAS projects",
+                    "use_cases": [
+                        "News aggregation with clean, unique articles",
+                        "Product comparison with deduplicated listings",
+                        "Content curation with quality filtering",
+                        "Social media monitoring with unique posts"
+                    ]
+                },
+                "saas_benefits": [
+                    "Higher quality data extraction",
+                    "Reduced storage requirements",
+                    "Better user experience",
+                    "More accurate analytics"
+                ]
             },
             "status": "healthy",
-            "service": "Array-Based Content Extraction API"
+            "service": "Array-Based Content Extraction API with Advanced Deduplication"
         })
     except Exception as e:
         return error_response(f"Array extraction test failed: {str(e)}", 500)
@@ -525,11 +610,11 @@ def test_array_extraction():
 @apply_rate_limit("5 per minute")
 def demo_array_extraction():
     """
-    Demo endpoint with pre-configured examples for common sites
+    Demo endpoint with pre-configured examples for common sites with deduplication
     
     Request body:
     {
-        "site_type": "adaderana_news",
+        "site_type": "yournews_site",
         "url": "https://yournewssite.lk/hot-news/",
         "limit": 5
     }
@@ -547,9 +632,9 @@ def demo_array_extraction():
         if not site_type or not url:
             return error_response("site_type and url are required", 400)
         
-        # Pre-configured selector templates
+        # Pre-configured selector templates with deduplication awareness
         selector_templates = {
-            'adaderana_news': {
+            'yournews_site': {
                 'array_selectors': {
                     'news_stories': {
                         'selector': '.news-story',
@@ -614,7 +699,7 @@ def demo_array_extraction():
         
         config = selector_templates[site_type]
         
-        # Run the extraction
+        # Run the extraction with deduplication
         crawler_service = ArrayBasedCrawlerService(current_app.config)
         
         try:
@@ -635,12 +720,24 @@ def demo_array_extraction():
             if 'arrays' in result.metadata:
                 response_data['arrays'] = result.metadata['arrays']
             
-            # Add demo info
-            response_data['demo_info'] = {
+            # Add demo info with deduplication results
+            demo_info = {
                 'site_type': site_type,
                 'template_used': config,
-                'extraction_successful': True
+                'extraction_successful': True,
+                'deduplication_summary': {}
             }
+            
+            # Add deduplication summary for each array
+            if 'arrays' in result.metadata:
+                for name, data in result.metadata['arrays'].items():
+                    demo_info['deduplication_summary'][name] = {
+                        'items_found': data.get('count', 0),
+                        'deduplication_applied': data.get('deduplication_applied', False),
+                        'quality_improved': data.get('deduplication_applied', False)
+                    }
+            
+            response_data['demo_info'] = demo_info
             
             return success_response(response_data)
         else:
