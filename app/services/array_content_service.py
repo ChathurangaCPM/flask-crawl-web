@@ -5,7 +5,7 @@ import random
 import time
 import re
 from typing import Dict, List, Optional, Any, Union
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 import difflib
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class ArrayContentExtractor:
-    """Extract content as arrays for repeated elements with deduplication"""
+    """Extract content as arrays for repeated elements with proper ordering and image URLs"""
     
     def __init__(self):
         # Tags to completely remove
@@ -41,6 +41,77 @@ class ArrayContentExtractor:
             'article', 'section', 'main', 'blockquote', 'pre',
             'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'table', 'tr', 'td', 'th'
         ]
+    
+    def _make_absolute_url(self, base_url: str, relative_url: str) -> str:
+        """Convert relative URL to absolute URL"""
+        if not relative_url:
+            return ''
+        
+        # If already absolute, return as is
+        if relative_url.startswith(('http://', 'https://')):
+            return relative_url
+        
+        # Handle protocol-relative URLs
+        if relative_url.startswith('//'):
+            parsed_base = urlparse(base_url)
+            return f"{parsed_base.scheme}:{relative_url}"
+        
+        # Join relative URL with base URL
+        try:
+            return urljoin(base_url, relative_url)
+        except Exception:
+            return relative_url
+    
+    def _extract_image_url(self, element, base_url: str) -> str:
+        """Extract image URL from img element and make it absolute"""
+        if not element:
+            return ''
+        
+        # Try different image URL attributes
+        img_url = ''
+        
+        # Check common image attributes in order of preference
+        for attr in ['src', 'data-src', 'data-lazy-src', 'data-original']:
+            img_url = element.get(attr, '').strip()
+            if img_url:
+                break
+        
+        # If no direct URL, check if there's an img tag inside
+        if not img_url and element.name != 'img':
+            img_tag = element.find('img')
+            if img_tag:
+                for attr in ['src', 'data-src', 'data-lazy-src', 'data-original']:
+                    img_url = img_tag.get(attr, '').strip()
+                    if img_url:
+                        break
+        
+        # Make URL absolute
+        if img_url:
+            return self._make_absolute_url(base_url, img_url)
+        
+        return ''
+    
+    def _extract_link_url(self, element, base_url: str) -> str:
+        """Extract link URL from anchor element and make it absolute"""
+        if not element:
+            return ''
+        
+        link_url = ''
+        
+        # If element is an anchor tag
+        if element.name == 'a':
+            link_url = element.get('href', '').strip()
+        else:
+            # Find anchor tag inside element
+            anchor_tag = element.find('a')
+            if anchor_tag:
+                link_url = anchor_tag.get('href', '').strip()
+        
+        # Make URL absolute
+        if link_url:
+            return self._make_absolute_url(base_url, link_url)
+        
+        return ''
     
     def _calculate_similarity(self, text1: str, text2: str) -> float:
         """Calculate similarity between two text strings"""
@@ -72,45 +143,16 @@ class ArrayContentExtractor:
         
         return False
     
-    def _deduplicate_sentences(self, text: str) -> str:
-        """Remove duplicate sentences within text"""
-        if not text or len(text) < 50:
-            return text
-        
-        # Split into sentences
-        sentences = []
-        current_sentence = ""
-        
-        for char in text:
-            current_sentence += char
-            if char in '.!?' and len(current_sentence.strip()) > 15:
-                sentence = current_sentence.strip()
-                if sentence:
-                    # Check for duplicates
-                    normalized = re.sub(r'\s+', ' ', sentence.lower())
-                    if not any(self._calculate_similarity(normalized, re.sub(r'\s+', ' ', s.lower())) > 0.8 
-                             for s in sentences):
-                        sentences.append(sentence)
-                current_sentence = ""
-        
-        # Add remaining text if any
-        if current_sentence.strip():
-            remaining = current_sentence.strip()
-            normalized = re.sub(r'\s+', ' ', remaining.lower())
-            if not any(self._calculate_similarity(normalized, re.sub(r'\s+', ' ', s.lower())) > 0.8 
-                     for s in sentences):
-                sentences.append(remaining)
-        
-        return ' '.join(sentences)
-    
     def _remove_duplicate_array_items(self, items: List[Dict]) -> List[Dict]:
-        """Remove duplicate items from array based on main_content"""
+        """Remove duplicate items from array based on main_content while preserving EXACT order"""
         if not items or len(items) <= 1:
             return items
         
         unique_items = []
         seen_contents = []
         
+        # Process items in EXACT order to preserve top-to-bottom sequence
+        # items[0] should be the first/top item on the webpage
         for item in items:
             main_content = item.get('main_content', '').strip()
             
@@ -124,21 +166,27 @@ class ArrayContentExtractor:
             else:
                 logger.debug(f"Removed duplicate array item: {main_content[:50]}...")
         
+        # Re-index to maintain 0, 1, 2, 3... order where 0 = top item
+        for i, item in enumerate(unique_items):
+            item['index'] = i
+        
         return unique_items
     
     def extract_array_content(self, html_content: str, 
                             array_selectors: Dict[str, Any], 
-                            exclude_selectors: Optional[List[str]] = None) -> Dict[str, Any]:
+                            exclude_selectors: Optional[List[str]] = None,
+                            base_url: str = '') -> Dict[str, Any]:
         """
-        Extract content as arrays for repeated elements with deduplication
+        Extract content as arrays for repeated elements with proper ordering and URLs
         
         Args:
             html_content: Raw HTML content
             array_selectors: Dict with selector configs
             exclude_selectors: List of CSS selectors to exclude
+            base_url: Base URL for making relative URLs absolute
             
         Returns:
-            Dict with extracted arrays and metadata (deduplicated)
+            Dict with extracted arrays and metadata (preserving order, absolute URLs)
         """
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -175,24 +223,25 @@ class ArrayContentExtractor:
                     if not selector:
                         continue
                     
-                    # Find all matching elements
+                    # Find all matching elements - PRESERVE ORDER (top to bottom)
                     elements = soup.select(selector)
                     
                     if limit and len(elements) > limit:
-                        elements = elements[:limit]
+                        elements = elements[:limit]  # Take first N elements (top items)
                     
                     array_items = []
                     
+                    # Process elements in ORDER (top to bottom as they appear on page)
+                    # BeautifulSoup select() returns elements in document order (top to bottom)
                     for i, element in enumerate(elements):
-                        # Extract main content with deduplication
+                        # Extract main content
                         main_content = self._extract_text_from_element(element)
-                        main_content = self._deduplicate_sentences(main_content)
                         
                         if not main_content or len(main_content.strip()) < 15:
                             continue
                         
                         item_data = {
-                            'index': i,
+                            'index': i,  # Preserve original order
                             'main_content': main_content
                         }
                         
@@ -200,27 +249,47 @@ class ArrayContentExtractor:
                         if sub_selectors:
                             for sub_name, sub_selector in sub_selectors.items():
                                 try:
-                                    sub_elements = element.select(sub_selector)
-                                    if sub_elements:
-                                        if len(sub_elements) == 1:
-                                            # Single element - extract as string with deduplication
-                                            sub_content = self._extract_text_from_element(sub_elements[0])
-                                            sub_content = self._deduplicate_sentences(sub_content)
-                                            item_data[sub_name] = sub_content
+                                    # Handle special cases for images and links
+                                    if sub_name.lower() in ['image', 'img', 'picture', 'photo']:
+                                        # Extract image URL
+                                        img_elements = element.select(sub_selector)
+                                        if img_elements:
+                                            img_url = self._extract_image_url(img_elements[0], base_url)
+                                            item_data[sub_name] = img_url
                                         else:
-                                            # Multiple elements - extract as array with deduplication
-                                            sub_contents = []
-                                            for sub_el in sub_elements:
-                                                sub_content = self._extract_text_from_element(sub_el)
-                                                sub_content = self._deduplicate_sentences(sub_content)
-                                                if sub_content and sub_content not in sub_contents:
-                                                    sub_contents.append(sub_content)
-                                            item_data[sub_name] = sub_contents
+                                            item_data[sub_name] = ''
+                                    
+                                    elif sub_name.lower() in ['link', 'url', 'href']:
+                                        # Extract link URL
+                                        link_elements = element.select(sub_selector)
+                                        if link_elements:
+                                            link_url = self._extract_link_url(link_elements[0], base_url)
+                                            item_data[sub_name] = link_url
+                                        else:
+                                            item_data[sub_name] = ''
+                                    
                                     else:
-                                        item_data[sub_name] = ""
+                                        # Extract text content
+                                        sub_elements = element.select(sub_selector)
+                                        if sub_elements:
+                                            if len(sub_elements) == 1:
+                                                # Single element - extract as string
+                                                sub_content = self._extract_text_from_element(sub_elements[0])
+                                                item_data[sub_name] = sub_content
+                                            else:
+                                                # Multiple elements - extract as array
+                                                sub_contents = []
+                                                for sub_el in sub_elements:
+                                                    sub_content = self._extract_text_from_element(sub_el)
+                                                    if sub_content and sub_content not in sub_contents:
+                                                        sub_contents.append(sub_content)
+                                                item_data[sub_name] = sub_contents[0] if len(sub_contents) == 1 else sub_contents
+                                        else:
+                                            item_data[sub_name] = ''
+                                
                                 except Exception as e:
                                     logger.warning(f"Error extracting sub-selector '{sub_name}': {str(e)}")
-                                    item_data[sub_name] = ""
+                                    item_data[sub_name] = ''
                         
                         # Add metadata
                         item_data['word_count'] = len(item_data['main_content'].split()) if item_data['main_content'] else 0
@@ -228,24 +297,25 @@ class ArrayContentExtractor:
                         
                         array_items.append(item_data)
                     
-                    # Remove duplicate items from the array
+                    # Remove duplicates while preserving EXACT order
+                    original_count = len(array_items)
                     array_items = self._remove_duplicate_array_items(array_items)
                     
-                    # Update indices after deduplication
-                    for i, item in enumerate(array_items):
-                        item['index'] = i
+                    # IMPORTANT: Do NOT re-index here as deduplication already handles it
+                    # array_items[0] should be the TOP item from the webpage
                     
                     extracted_arrays[selector_name] = {
                         'selector': selector,
                         'items': array_items,
                         'count': len(array_items),
                         'sub_selectors_used': list(sub_selectors.keys()) if sub_selectors else [],
-                        'deduplication_applied': len(array_items) < len(elements) if elements else False
+                        'deduplication_applied': len(array_items) < original_count,
+                        'order_preserved': True  # Always true - we preserve top-to-bottom order
                     }
                     
                     total_items += len(array_items)
                     
-                    logger.info(f"Selector '{selector_name}': {len(elements)} elements found, {len(array_items)} unique items after deduplication")
+                    logger.info(f"Selector '{selector_name}': {len(elements)} elements found, {len(array_items)} unique items (order preserved)")
                     
                 except Exception as e:
                     logger.error(f"Error processing selector '{selector_name}': {str(e)}")
@@ -261,18 +331,14 @@ class ArrayContentExtractor:
                 'metadata': {
                     'total_selectors': len(array_selectors),
                     'total_items_extracted': total_items,
-                    'extraction_method': 'array_based_deduplicated',
+                    'extraction_method': 'array_based_ordered',
+                    'order_preserved': True,
+                    'image_urls_absolute': True,
+                    'link_urls_absolute': True,
                     'successful_selectors': [
                         name for name, data in extracted_arrays.items() 
                         if data['count'] > 0
-                    ],
-                    'deduplication_stats': {
-                        'total_arrays': len(extracted_arrays),
-                        'deduplication_applied': any(
-                            data.get('deduplication_applied', False) 
-                            for data in extracted_arrays.values()
-                        )
-                    }
+                    ]
                 }
             }
             
@@ -287,7 +353,7 @@ class ArrayContentExtractor:
             }
     
     def _extract_text_from_element(self, element) -> str:
-        """Extract clean text from a BeautifulSoup element without duplication"""
+        """Extract clean text from a BeautifulSoup element"""
         if not element:
             return ""
         
@@ -325,7 +391,7 @@ class ArrayContentExtractor:
 
 
 class ArrayBasedCrawlerService:
-    """Crawler service for array-based content extraction with deduplication"""
+    """Crawler service for array-based content extraction with proper ordering"""
     
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
@@ -348,13 +414,7 @@ class ArrayBasedCrawlerService:
                                 exclude_selectors: Optional[List[str]] = None,
                                 format_output: str = 'structured') -> CrawlResult:
         """
-        Crawl URL and extract content as arrays with deduplication
-        
-        Args:
-            url: URL to crawl
-            array_selectors: Dict of selectors to extract as arrays
-            exclude_selectors: List of CSS selectors to exclude
-            format_output: 'structured', 'flat', or 'summary'
+        Crawl URL and extract content as arrays with proper ordering and image URLs
         """
         start_time = time.time()
         
@@ -375,7 +435,7 @@ class ArrayBasedCrawlerService:
                     error="array_selectors must be a non-empty dictionary"
                 )
             
-            if len(array_selectors) > 5:  # Limit number of array selectors
+            if len(array_selectors) > 5:
                 return CrawlResult(
                     success=False,
                     url=url,
@@ -443,7 +503,7 @@ class ArrayBasedCrawlerService:
                             exclude_selectors: Optional[List[str]],
                             format_output: str,
                             crawl_time: float) -> CrawlResult:
-        """Process crawl result for array extraction with deduplication"""
+        """Process crawl result for array extraction with proper ordering"""
         try:
             # Check if crawl was successful
             if hasattr(result, 'success') and not result.success:
@@ -466,9 +526,9 @@ class ArrayBasedCrawlerService:
                     error="No HTML content found"
                 )
             
-            # Extract array content with deduplication
+            # Extract array content with proper ordering and absolute URLs
             extraction_result = self.extractor.extract_array_content(
-                html_content, array_selectors, exclude_selectors
+                html_content, array_selectors, exclude_selectors, url
             )
             
             arrays = extraction_result["arrays"]
@@ -490,29 +550,27 @@ class ArrayBasedCrawlerService:
                 except:
                     title = ''
             
-            # Calculate total word count from unique items only
+            # Calculate total word count
             total_words = sum(
                 sum(item.get('word_count', 0) for item in data.get('items', []))
                 for data in arrays.values()
             )
             
-            # Prepare metadata with deduplication info
+            # Prepare metadata
             metadata = {
                 'crawl_time': round(crawl_time, 2),
                 'status_code': getattr(result, 'status_code', 200),
                 'original_html_length': len(html_content),
-                'extraction_mode': 'array_based_deduplicated',
+                'extraction_mode': 'array_based_ordered',
                 'array_selectors_used': list(array_selectors.keys()),
                 'exclude_selectors_used': exclude_selectors or [],
                 'format_output': format_output,
-                'arrays': arrays,  # Full array data with deduplication info
+                'arrays': arrays,
                 'content_quality': {
-                    'total_unique_items': sum(data['count'] for data in arrays.values()),
-                    'deduplication_applied': extraction_metadata.get('deduplication_stats', {}).get('deduplication_applied', False),
-                    'arrays_with_deduplication': [
-                        name for name, data in arrays.items() 
-                        if data.get('deduplication_applied', False)
-                    ]
+                    'total_items': sum(data['count'] for data in arrays.values()),
+                    'order_preserved': True,
+                    'image_urls_absolute': True,
+                    'link_urls_absolute': True
                 },
                 **extraction_metadata
             }
@@ -538,15 +596,14 @@ class ArrayBasedCrawlerService:
             )
     
     def _format_array_output(self, arrays: Dict[str, Any], format_type: str) -> str:
-        """Format array output based on type with deduplication awareness"""
+        """Format array output based on type"""
         if format_type == 'structured':
-            # Return structured format with clear sections and deduplication info
+            # Return structured format
             output_parts = []
             for selector_name, data in arrays.items():
                 items = data.get('items', [])
                 if items:
-                    dedup_info = " (deduplicated)" if data.get('deduplication_applied', False) else ""
-                    output_parts.append(f"=== {selector_name.upper()} ({data['count']} unique items{dedup_info}) ===")
+                    output_parts.append(f"=== {selector_name.upper()} ({data['count']} items - order preserved) ===")
                     
                     for i, item in enumerate(items, 1):
                         item_text = f"\n[Item {i}]\n{item['main_content']}"
@@ -555,37 +612,35 @@ class ArrayBasedCrawlerService:
                         for key, value in item.items():
                             if key not in ['index', 'main_content', 'word_count', 'char_count']:
                                 if isinstance(value, list):
-                                    if value:  # Only show non-empty lists
+                                    if value:
                                         item_text += f"\n{key}: {' | '.join(str(v) for v in value if v)}"
                                 elif value:
                                     item_text += f"\n{key}: {value}"
                         
                         output_parts.append(item_text)
-                    output_parts.append("")  # Add spacing
+                    output_parts.append("")
             
             return "\n".join(output_parts)
         
         elif format_type == 'flat':
-            # Return flat list of all unique items
+            # Return flat list of all items in order
             all_items = []
             for data in arrays.values():
                 for item in data.get('items', []):
-                    if item['main_content'] and item['main_content'] not in all_items:
+                    if item['main_content']:
                         all_items.append(item['main_content'])
             return "\n\n".join(all_items)
         
         elif format_type == 'summary':
-            # Return summary with counts and deduplication info
+            # Return summary with counts
             summary_parts = []
             for selector_name, data in arrays.items():
                 count = data['count']
                 selector = data['selector']
-                dedup_note = " (after deduplication)" if data.get('deduplication_applied', False) else ""
-                summary_parts.append(f"{selector_name}: {count} unique items{dedup_note} found with selector '{selector}'")
+                summary_parts.append(f"{selector_name}: {count} items found with selector '{selector}' (order preserved)")
             return "\n".join(summary_parts)
         
         else:
-            # Default to structured
             return self._format_array_output(arrays, 'structured')
     
     async def crawl_multiple_array_content(self, urls: List[str], 
@@ -593,8 +648,8 @@ class ArrayBasedCrawlerService:
                                          exclude_selectors: Optional[List[str]] = None,
                                          format_output: str = 'structured',
                                          max_concurrent: int = 2) -> List[CrawlResult]:
-        """Crawl multiple URLs for array content with deduplication"""
-        max_concurrent = min(max_concurrent, 3)  # Conservative limit
+        """Crawl multiple URLs for array content"""
+        max_concurrent = min(max_concurrent, 3)
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def crawl_with_limit(url):

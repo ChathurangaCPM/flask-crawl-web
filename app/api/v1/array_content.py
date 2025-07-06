@@ -1,4 +1,4 @@
-# app/api/v1/array_content.py - FIXED VERSION WITH DEDUPLICATION
+# app/api/v1/array_content.py - FIXED VERSION - Order & Image URLs
 from flask import request, jsonify, current_app
 import asyncio
 import time
@@ -48,31 +48,65 @@ def safe_async_run(coro, timeout=30):
 
 @api_v1.route('/content/array', methods=['POST'])
 @apply_rate_limit("10 per minute")
-def extract_array_content():
+def extract_repeated_elements():
     """
-    Extract repeated elements as arrays from specific selectors - WITH DEDUPLICATION
+    Extract repeated elements with proper ordering (top to bottom) and absolute image URLs
     
-    Perfect for news items, product lists, articles, etc.
-    
-    Request body:
+    Request Example:
     {
-        "url": "https://yournewssite.lk/hot-news/",
+        "url": "https://news-site.com",
+        "selector": ".news-item",
         "config": {
-            "array_selectors": {
-                "news_stories": {
-                    "selector": ".news-story",
-                    "sub_selectors": {
-                        "title": "h2 a",
-                        "summary": "p",
-                        "date": ".comments span",
-                        "link": "h2 a",
-                        "image": ".thumb-image img"
-                    },
-                    "limit": 10
-                }
+            "sub_selectors": {
+                "title": "h2 a, h3 a, .title",
+                "summary": "p, .summary, .excerpt", 
+                "image": "img",  // Will extract actual image URL
+                "date": ".date, .time, time",
+                "link": "a",     // Will extract actual link URL
+                "author": ".author, .by"
             },
-            "exclude_selectors": [".comments script", ".advertisement"],
-            "format": "structured"
+            "limit": 20,
+            "exclude_selectors": [".ads", ".sidebar"]
+        }
+    }
+    
+    Response:
+    {
+        "success": true,
+        "data": {
+            "url": "https://news-site.com",
+            "selector": ".news-item",
+            "total_found": 5,
+            "items": [
+                {
+                    "index": 0,  // Preserved order: 0 = top item on page
+                    "title": "Latest Breaking News",
+                    "summary": "This is the news summary...",
+                    "image": "https://news-site.com/images/news1.jpg",  // Absolute URL
+                    "date": "2024-01-15",
+                    "link": "https://news-site.com/news/latest-breaking-news",  // Absolute URL
+                    "author": "John Doe",
+                    "main_content": "Full extracted text content",
+                    "word_count": 45
+                },
+                {
+                    "index": 1,  // Second item from top
+                    "title": "Second News Title",
+                    "summary": "Another news summary...",
+                    "image": "https://news-site.com/images/news2.jpg",
+                    "date": "2024-01-14",
+                    "link": "https://news-site.com/news/second-news",
+                    "author": "Jane Smith",
+                    "main_content": "Full extracted text content",
+                    "word_count": 38
+                }
+            ],
+            "extraction_info": {
+                "order_preserved": true,
+                "image_urls_absolute": true,
+                "link_urls_absolute": true,
+                "extraction_time": 2.3
+            }
         }
     }
     """
@@ -81,147 +115,286 @@ def extract_array_content():
     try:
         data = request.get_json()
         
-        # Validate request
+        # Validate basic request
         is_valid, error_msg = validate_crawl_request(data)
         if not is_valid:
             return error_response(error_msg, 400)
         
         url = data['url']
+        main_selector = data.get('selector', '')
         config = data.get('config', {})
         
-        # Extract array configuration
-        array_selectors = config.get('array_selectors', {})
+        # Validation
+        if not main_selector:
+            return error_response("'selector' field is required - specify CSS selector for repeated elements", 400)
+        
+        # Extract configuration
+        sub_selectors = config.get('sub_selectors', {})
+        limit = min(config.get('limit', 50), 100)
         exclude_selectors = config.get('exclude_selectors', [])
-        format_output = config.get('format', 'structured')  # structured, flat, summary
         
-        # Validate array selectors
-        if not array_selectors:
-            return error_response("array_selectors configuration is required", 400)
+        # Validate sub_selectors
+        if sub_selectors and not isinstance(sub_selectors, dict):
+            return error_response("sub_selectors must be a dictionary", 400)
         
-        if not isinstance(array_selectors, dict):
-            return error_response("array_selectors must be a dictionary", 400)
+        # Build the array selectors configuration for the service
+        array_selectors = {
+            'items': {
+                'selector': main_selector,
+                'sub_selectors': sub_selectors,
+                'limit': limit
+            }
+        }
         
-        if len(array_selectors) > 5:
-            return error_response("Maximum 5 array selectors allowed", 400)
-        
-        # Validate format
-        if format_output not in ['structured', 'flat', 'summary']:
-            return error_response("format must be one of: structured, flat, summary", 400)
-        
-        # Log the request for debugging
-        current_app.logger.info(f"Array content extraction request:")
+        current_app.logger.info(f"Array extraction request:")
         current_app.logger.info(f"  URL: {url}")
-        current_app.logger.info(f"  Array selectors: {list(array_selectors.keys())}")
-        current_app.logger.info(f"  Format: {format_output}")
+        current_app.logger.info(f"  Main selector: {main_selector}")
+        current_app.logger.info(f"  Sub-selectors: {list(sub_selectors.keys())}")
+        current_app.logger.info(f"  Limit: {limit}")
         
-        # Initialize array-based crawler service
+        # Initialize crawler service
         crawler_service = ArrayBasedCrawlerService(current_app.config)
         
-        # Run array content extraction
+        # Run extraction
         try:
             result = safe_async_run(
                 crawler_service.crawl_array_content(
-                    url, array_selectors, exclude_selectors, format_output
+                    url, array_selectors, exclude_selectors, 'structured'
                 ),
-                timeout=35
+                timeout=40
             )
         except asyncio.TimeoutError:
-            return error_response("Array content extraction timeout after 35 seconds", 408)
+            return error_response("Array extraction timeout after 40 seconds", 408)
         except Exception as crawl_error:
-            current_app.logger.error(f"Array content extraction failed: {str(crawl_error)}")
+            current_app.logger.error(f"Array extraction failed: {str(crawl_error)}")
             current_app.logger.error(f"Traceback: {traceback.format_exc()}")
-            return error_response(f"Array content extraction failed: {str(crawl_error)}", 500)
+            return error_response(f"Array extraction failed: {str(crawl_error)}", 500)
         
-        # Add timing information and enhanced metadata
+        # Process results
         total_time = time.time() - start_time
+        
         if result and result.success:
-            if hasattr(result, 'metadata') and result.metadata:
-                result.metadata['api_response_time'] = round(total_time, 2)
-                result.metadata['endpoint'] = 'array_content_deduplicated'
+            # Extract items from the result
+            arrays_data = result.metadata.get('arrays', {})
+            items_data = arrays_data.get('items', {})
+            raw_items = items_data.get('items', [])
+            
+            # Format items to have all fields at the same level (preserving order)
+            formatted_items = []
+            
+            for item in raw_items:  # Items are already in correct order (top to bottom)
+                # Start with basic fields
+                formatted_item = {
+                    'index': item.get('index', 0),  # Order preserved: 0 = top item
+                    'main_content': item.get('main_content', ''),
+                    'word_count': item.get('word_count', 0)
+                }
                 
-                # Add enhanced deduplication statistics
-                arrays = result.metadata.get('arrays', {})
-                if arrays:
-                    total_items_before = sum(
-                        len(data.get('items', [])) for data in arrays.values()
-                    )
-                    total_items_after = sum(
-                        data.get('count', 0) for data in arrays.values()
-                    )
-                    
-                    result.metadata['deduplication_stats'] = {
-                        'total_arrays': len(arrays),
-                        'total_items_before_dedup': total_items_before,
-                        'total_items_after_dedup': total_items_after,
-                        'items_removed': max(0, total_items_before - total_items_after),
-                        'deduplication_ratio': round(
-                            (max(0, total_items_before - total_items_after) / max(total_items_before, 1)) * 100, 1
-                        ),
-                        'arrays_with_deduplication': [
-                            name for name, data in arrays.items() 
-                            if data.get('deduplication_applied', False)
-                        ]
-                    }
-            
-            # Create enhanced response with array data easily accessible
-            response_data = result.to_dict()
-            
-            # Add easy access to arrays in response root
-            if 'arrays' in result.metadata:
-                response_data['arrays'] = result.metadata['arrays']
+                # Add all sub-selector extracted fields
+                for key, value in item.items():
+                    # Skip internal fields
+                    if key not in ['index', 'main_content', 'word_count', 'char_count']:
+                        # Handle different value types
+                        if isinstance(value, list):
+                            # Join list values or take first non-empty item
+                            if value:
+                                # If it's a list of strings, take the first one
+                                if all(isinstance(v, str) for v in value):
+                                    formatted_item[key] = value[0] if len(value) == 1 else ' | '.join(value)
+                                else:
+                                    formatted_item[key] = value[0]
+                            else:
+                                formatted_item[key] = ''
+                        else:
+                            formatted_item[key] = value or ''
                 
-                # Create a simplified arrays summary
-                arrays_summary = {}
-                for name, array_data in result.metadata['arrays'].items():
-                    arrays_summary[name] = {
-                        'count': array_data['count'],
-                        'selector': array_data['selector'],
-                        'deduplication_applied': array_data.get('deduplication_applied', False),
-                        'items_preview': [
-                            item['main_content'][:100] + "..." if len(item['main_content']) > 100 else item['main_content'] 
-                            for item in array_data['items'][:3]  # First 3 items preview
-                        ]
-                    }
-                response_data['arrays_preview'] = arrays_summary
+                # Ensure all requested sub_selectors are present (even if empty)
+                for sub_key in sub_selectors.keys():
+                    if sub_key not in formatted_item:
+                        formatted_item[sub_key] = ''
+                
+                formatted_items.append(formatted_item)
             
-            # Log successful extraction
-            current_app.logger.info(f"Array extraction successful:")
-            current_app.logger.info(f"  Arrays found: {len(result.metadata.get('arrays', {}))}")
-            current_app.logger.info(f"  Total unique items: {result.metadata.get('content_quality', {}).get('total_unique_items', 0)}")
-            current_app.logger.info(f"  Deduplication applied: {result.metadata.get('content_quality', {}).get('deduplication_applied', False)}")
+            # Create clean response
+            response_data = {
+                'url': url,
+                'selector': main_selector,
+                'total_found': len(formatted_items),
+                'items': formatted_items,  # Items in order: index 0 = top of page
+                'extraction_info': {
+                    'sub_selectors_used': list(sub_selectors.keys()),
+                    'exclude_selectors_used': exclude_selectors,
+                    'order_preserved': True,  # Top to bottom order maintained
+                    'image_urls_absolute': True,  # Image URLs converted to absolute
+                    'link_urls_absolute': True,   # Link URLs converted to absolute
+                    'deduplication_applied': items_data.get('deduplication_applied', False),
+                    'extraction_time': round(total_time, 2)
+                }
+            }
+            
+            current_app.logger.info(f"Extraction successful:")
+            current_app.logger.info(f"  Total items found: {len(formatted_items)}")
+            current_app.logger.info(f"  Order preserved: top to bottom")
+            current_app.logger.info(f"  Image URLs made absolute: {any('image' in str(k).lower() for k in sub_selectors.keys())}")
+            current_app.logger.info(f"  Fields per item: {list(formatted_items[0].keys()) if formatted_items else []}")
             
             return success_response(response_data)
+        
         else:
-            error_msg = result.error if result else "Array content extraction failed"
-            current_app.logger.error(f"Array extraction failed: {error_msg}")
+            error_msg = result.error if result else "Array extraction failed"
             return error_response(error_msg, 400)
             
     except Exception as e:
-        current_app.logger.error(f"Array content endpoint error: {str(e)}")
+        current_app.logger.error(f"Array extraction endpoint error: {str(e)}")
         current_app.logger.error(f"Full traceback: {traceback.format_exc()}")
         return error_response("Internal server error", 500)
 
+@api_v1.route('/content/array/simple', methods=['POST'])
+@apply_rate_limit("15 per minute")
+def extract_simple_repeated_elements():
+    """
+    Simplified version - automatically detect common fields with proper ordering
+    
+    Request:
+    {
+        "url": "https://news-site.com",
+        "selector": ".news-item"
+    }
+    
+    Automatically extracts: title, content, image (with absolute URL), link (with absolute URL), date, author
+    Order preserved: index 0 = top item on page
+    """
+    start_time = time.time()
+    
+    try:
+        data = request.get_json()
+        
+        is_valid, error_msg = validate_crawl_request(data)
+        if not is_valid:
+            return error_response(error_msg, 400)
+        
+        url = data['url']
+        main_selector = data.get('selector', '')
+        
+        if not main_selector:
+            return error_response("'selector' field is required", 400)
+        
+        # Auto-detect common sub-selectors with proper field names for images and links
+        auto_sub_selectors = {
+            'title': 'h1, h2, h3, h4, .title, .headline, .news-title, .article-title',
+            'content': 'p, .content, .summary, .excerpt, .description, .text',
+            'image': 'img',  # Will extract actual image URL
+            'link': 'a',     # Will extract actual link URL
+            'date': '.date, .time, time, .timestamp, .published',
+            'author': '.author, .by, .writer, .reporter'
+        }
+        
+        # Build config
+        array_selectors = {
+            'items': {
+                'selector': main_selector,
+                'sub_selectors': auto_sub_selectors,
+                'limit': 20
+            }
+        }
+        
+        exclude_selectors = ['.ads', '.advertisement', '.sidebar', '.social-share']
+        
+        current_app.logger.info(f"Simple array extraction:")
+        current_app.logger.info(f"  URL: {url}")
+        current_app.logger.info(f"  Selector: {main_selector}")
+        current_app.logger.info(f"  Auto sub-selectors: {list(auto_sub_selectors.keys())}")
+        
+        crawler_service = ArrayBasedCrawlerService(current_app.config)
+        
+        try:
+            result = safe_async_run(
+                crawler_service.crawl_array_content(
+                    url, array_selectors, exclude_selectors, 'structured'
+                ),
+                timeout=30
+            )
+        except Exception as crawl_error:
+            return error_response(f"Simple extraction failed: {str(crawl_error)}", 500)
+        
+        total_time = time.time() - start_time
+        
+        if result and result.success:
+            arrays_data = result.metadata.get('arrays', {})
+            items_data = arrays_data.get('items', {})
+            raw_items = items_data.get('items', [])
+            
+            # Format items with all fields at same level (order preserved)
+            formatted_items = []
+            
+            for item in raw_items:  # Already in correct order
+                formatted_item = {
+                    'index': item.get('index', 0),  # 0 = top item
+                    'title': '',
+                    'content': item.get('main_content', ''),
+                    'image': '',  # Will contain absolute URL
+                    'link': '',   # Will contain absolute URL
+                    'date': '',
+                    'author': '',
+                    'word_count': item.get('word_count', 0)
+                }
+                
+                # Fill in extracted fields
+                for key, value in item.items():
+                    if key in auto_sub_selectors:
+                        if isinstance(value, list) and value:
+                            formatted_item[key] = value[0]
+                        elif value:
+                            formatted_item[key] = str(value)
+                
+                # Use main_content as content if no specific content found
+                if not formatted_item['content'] and item.get('main_content'):
+                    formatted_item['content'] = item.get('main_content', '')
+                
+                formatted_items.append(formatted_item)
+            
+            response_data = {
+                'url': url,
+                'selector': main_selector,
+                'total_found': len(formatted_items),
+                'items': formatted_items,  # Order preserved: 0 = top item
+                'extraction_info': {
+                    'mode': 'simple_auto_detection',
+                    'order_preserved': True,
+                    'image_urls_absolute': True,
+                    'link_urls_absolute': True,
+                    'extraction_time': round(total_time, 2),
+                    'fields_extracted': ['title', 'content', 'image', 'link', 'date', 'author']
+                }
+            }
+            
+            return success_response(response_data)
+        
+        else:
+            return error_response(result.error if result else "Simple extraction failed", 400)
+            
+    except Exception as e:
+        current_app.logger.error(f"Simple array extraction error: {str(e)}")
+        return error_response("Simple extraction failed", 500)
+
 @api_v1.route('/content/array/batch', methods=['POST'])
 @apply_rate_limit("2 per minute")
-def batch_extract_array_content():
+def batch_extract_repeated_elements():
     """
-    Batch extract array content from multiple URLs with deduplication
+    Extract repeated elements from multiple URLs with proper ordering and absolute URLs
     
-    Request body:
+    Request:
     {
         "urls": ["https://site1.com", "https://site2.com"],
+        "selector": ".news-item",
         "config": {
-            "array_selectors": {
-                "articles": {
-                    "selector": ".article",
-                    "sub_selectors": {
-                        "title": "h2",
-                        "summary": ".excerpt"
-                    }
-                }
+            "sub_selectors": {
+                "title": "h2",
+                "summary": "p",
+                "image": "img",
+                "link": "a"
             },
-            "format": "structured",
-            "max_concurrent": 2
+            "limit": 10
         }
     }
     """
@@ -230,519 +403,215 @@ def batch_extract_array_content():
     try:
         data = request.get_json()
         
+        # Validate batch request
         max_batch_size = min(current_app.config.get('MAX_BATCH_SIZE', 3), 3)
-        is_valid, error_msg = validate_batch_request(data, max_batch_size)
-        if not is_valid:
-            return error_response(error_msg, 400)
         
-        urls = data['urls'][:max_batch_size]
+        if not data or 'urls' not in data:
+            return error_response("'urls' array is required", 400)
+        
+        urls = data['urls']
+        if not isinstance(urls, list) or len(urls) == 0:
+            return error_response("'urls' must be a non-empty array", 400)
+        
+        if len(urls) > max_batch_size:
+            return error_response(f"Maximum {max_batch_size} URLs allowed", 400)
+        
+        urls = urls[:max_batch_size]
+        main_selector = data.get('selector', '')
         config = data.get('config', {})
         
+        if not main_selector:
+            return error_response("'selector' field is required", 400)
+        
         # Extract configuration
-        array_selectors = config.get('array_selectors', {})
+        sub_selectors = config.get('sub_selectors', {})
+        limit = min(config.get('limit', 20), 50)
         exclude_selectors = config.get('exclude_selectors', [])
-        format_output = config.get('format', 'structured')
         max_concurrent = min(config.get('max_concurrent', 2), 2)
         
-        # Validate
-        if not array_selectors:
-            return error_response("array_selectors configuration is required", 400)
-        
-        if len(array_selectors) > 3:  # Stricter for batch
-            return error_response("Maximum 3 array selectors allowed for batch processing", 400)
+        array_selectors = {
+            'items': {
+                'selector': main_selector,
+                'sub_selectors': sub_selectors,
+                'limit': limit
+            }
+        }
         
         crawler_service = ArrayBasedCrawlerService(current_app.config)
         
         try:
             results = safe_async_run(
                 crawler_service.crawl_multiple_array_content(
-                    urls, array_selectors, exclude_selectors, format_output, max_concurrent
+                    urls, array_selectors, exclude_selectors, 'structured', max_concurrent
                 ),
                 timeout=120
             )
-        except asyncio.TimeoutError:
-            return error_response("Batch array content extraction timeout after 120 seconds", 408)
         except Exception as crawl_error:
-            current_app.logger.error(f"Batch array content extraction failed: {str(crawl_error)}")
-            return error_response(f"Batch array content extraction failed: {str(crawl_error)}", 500)
+            return error_response(f"Batch extraction failed: {str(crawl_error)}", 500)
         
-        # Process results with enhanced deduplication statistics
-        if results:
-            result_dicts = []
-            successful = 0
-            failed = 0
-            total_items = 0
-            total_deduplication_savings = 0
+        # Process batch results
+        batch_results = []
+        total_items = 0
+        successful_extractions = 0
+        
+        for i, result in enumerate(results):
+            url = urls[i] if i < len(urls) else "unknown"
             
-            for result in results:
-                try:
-                    result_dict = result.to_dict() if result else {"success": False, "error": "No result"}
-                    
-                    # Add array data to response and calculate deduplication stats
-                    if result and result.success and hasattr(result, 'metadata') and 'arrays' in result.metadata:
-                        result_dict['arrays'] = result.metadata['arrays']
-                        
-                        # Count total items for this result
-                        for array_data in result.metadata['arrays'].values():
-                            total_items += array_data.get('count', 0)
-                        
-                        # Track deduplication savings
-                        dedup_stats = result.metadata.get('deduplication_stats', {})
-                        items_removed = dedup_stats.get('items_removed', 0)
-                        total_deduplication_savings += items_removed
-                    
-                    result_dicts.append(result_dict)
-                    
-                    if result and result.success:
-                        successful += 1
-                    else:
-                        failed += 1
-                        
-                except Exception as e:
-                    result_dicts.append({"success": False, "error": f"Result processing error: {str(e)}"})
-                    failed += 1
-        else:
-            result_dicts = []
-            successful = 0
-            failed = len(urls)
-            total_items = 0
-            total_deduplication_savings = 0
-        
-        total_time = time.time() - start_time
-        
-        return success_response({
-            'results': result_dicts,
-            'total_processed': len(result_dicts),
-            'successful': successful,
-            'failed': failed,
-            'total_items_extracted': total_items,
-            'total_time': round(total_time, 2),
-            'average_time_per_url': round(total_time / len(urls), 2) if urls else 0,
-            'mode': 'array_content_batch_deduplicated',
-            'array_selectors_used': list(array_selectors.keys()),
-            'format_used': format_output,
-            'batch_deduplication_stats': {
-                'total_duplicate_items_removed': total_deduplication_savings,
-                'deduplication_applied': total_deduplication_savings > 0,
-                'efficiency_improvement': f"{total_deduplication_savings} duplicate items removed"
-            },
-            'features': {
-                'array_based_extraction': True,
-                'sub_selector_support': True,
-                'repeated_elements_as_arrays': True,
-                'advanced_deduplication': True,
-                'content_quality_enhancement': True
-            }
-        })
-        
-    except Exception as e:
-        current_app.logger.error(f"Batch array content error: {str(e)}")
-        current_app.logger.error(f"Full traceback: {traceback.format_exc()}")
-        return error_response("Batch array content processing failed", 500)
-
-@api_v1.route('/content/array/<path:url>', methods=['GET'])
-@apply_rate_limit("20 per minute")
-def extract_array_content_get(url):
-    """
-    Quick array extraction via GET with query parameters and deduplication
-    
-    Query parameters:
-    - selector: CSS selector for repeated elements (e.g., ?selector=.news-story)
-    - title: Sub-selector for titles (e.g., &title=h2 a)
-    - summary: Sub-selector for summaries (e.g., &summary=p)
-    - exclude: Comma-separated exclude selectors
-    - limit: Maximum number of items to extract
-    - format: Output format (structured, flat, summary)
-    """
-    start_time = time.time()
-    
-    try:
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-        
-        # Parse query parameters
-        main_selector = request.args.get('selector', '')
-        title_selector = request.args.get('title', '')
-        summary_selector = request.args.get('summary', '')
-        link_selector = request.args.get('link', '')
-        date_selector = request.args.get('date', '')
-        exclude_param = request.args.get('exclude', '')
-        limit = min(int(request.args.get('limit', 20)), 50)
-        format_output = request.args.get('format', 'structured')
-        
-        if not main_selector:
-            return error_response("selector parameter is required", 400)
-        
-        # Build array selectors config
-        array_selectors = {
-            'items': {
-                'selector': main_selector,
-                'limit': limit,
-                'sub_selectors': {}
-            }
-        }
-        
-        # Add sub-selectors if provided
-        if title_selector:
-            array_selectors['items']['sub_selectors']['title'] = title_selector
-        if summary_selector:
-            array_selectors['items']['sub_selectors']['summary'] = summary_selector
-        if link_selector:
-            array_selectors['items']['sub_selectors']['link'] = link_selector
-        if date_selector:
-            array_selectors['items']['sub_selectors']['date'] = date_selector
-        
-        # Parse exclude selectors
-        exclude_selectors = [s.strip() for s in exclude_param.split(',') if s.strip()] if exclude_param else []
-        
-        crawler_service = ArrayBasedCrawlerService(current_app.config)
-        
-        try:
-            result = safe_async_run(
-                crawler_service.crawl_array_content(
-                    url, array_selectors, exclude_selectors, format_output
-                ),
-                timeout=20
-            )
-        except asyncio.TimeoutError:
-            return error_response("GET array extraction timeout after 20 seconds", 408)
-        except Exception as crawl_error:
-            current_app.logger.error(f"GET array extraction failed: {str(crawl_error)}")
-            return error_response(f"GET array extraction failed: {str(crawl_error)}", 500)
-        
-        total_time = time.time() - start_time
-        if result and result.success:
-            if hasattr(result, 'metadata') and result.metadata:
-                result.metadata['api_response_time'] = round(total_time, 2)
-                result.metadata['endpoint'] = 'array_content_get_deduplicated'
-            
-            response_data = result.to_dict()
-            if 'arrays' in result.metadata:
-                response_data['arrays'] = result.metadata['arrays']
+            if result and result.success:
+                arrays_data = result.metadata.get('arrays', {})
+                items_data = arrays_data.get('items', {})
+                raw_items = items_data.get('items', [])
                 
-                # Add GET-specific deduplication info
-                arrays_data = result.metadata['arrays'].get('items', {})
-                if arrays_data:
-                    response_data['get_extraction_info'] = {
-                        'selector_used': main_selector,
-                        'items_found': arrays_data.get('count', 0),
-                        'deduplication_applied': arrays_data.get('deduplication_applied', False),
-                        'sub_selectors_used': arrays_data.get('sub_selectors_used', [])
+                # Format items for this URL (preserve order)
+                formatted_items = []
+                for item in raw_items:
+                    formatted_item = {
+                        'index': item.get('index', 0),  # Order preserved
+                        'main_content': item.get('main_content', ''),
+                        'word_count': item.get('word_count', 0)
                     }
-            
-            return success_response(response_data)
-        else:
-            error_msg = result.error if result else "GET array extraction failed"
-            return error_response(error_msg, 400)
-            
-    except Exception as e:
-        current_app.logger.error(f"GET array extraction error: {str(e)}")
-        return error_response("GET array request failed", 500)
-
-@api_v1.route('/content/array/test', methods=['GET'])
-@apply_rate_limit("60 per minute")
-def test_array_extraction():
-    """Test endpoint for array-based extraction with deduplication examples"""
-    try:
-        return success_response({
-            "message": "Array-based content extraction service is ready (WITH DEDUPLICATION)",
-            "version": "2.0 - Enhanced with Advanced Deduplication",
-            "description": "Extract repeated elements (like news items, products, articles) as structured arrays with automatic deduplication",
-            "endpoints": {
-                "array": {
-                    "url": "POST /api/v1/content/array",
-                    "description": "Extract repeated elements as arrays with sub-selectors and deduplication",
-                    "perfect_for": ["News lists", "Product listings", "Article feeds", "Social media posts", "Search results"],
-                    "deduplication_features": [
-                        "Removes duplicate items within arrays",
-                        "Eliminates repeated content in sub-selectors",
-                        "Prevents duplicate sentences within items",
-                        "Maintains content quality and uniqueness"
-                    ]
-                },
-                "array_batch": {
-                    "url": "POST /api/v1/content/array/batch",
-                    "description": "Batch extract arrays from multiple URLs with deduplication"
-                },
-                "array_get": {
-                    "url": "GET /api/v1/content/array/<url>",
-                    "description": "Quick array extraction via GET parameters with deduplication"
-                }
-            },
-            "deduplication_improvements": {
-                "what_was_fixed": [
-                    "Duplicate items in arrays from similar content",
-                    "Repeated content in main_content field",
-                    "Overlapping text from sub-selectors",
-                    "Same sentences appearing multiple times",
-                    "Nested element content duplication"
-                ],
-                "how_it_works": [
-                    "1. Extract content from each array element individually",
-                    "2. Remove duplicate sentences within each item",
-                    "3. Compare items across the array and remove duplicates",
-                    "4. Clean up sub-selector content to avoid overlaps",
-                    "5. Provide deduplication statistics in response"
-                ],
-                "benefits": [
-                    "Higher quality content arrays",
-                    "Reduced response size",
-                    "Better user experience",
-                    "More accurate item counts",
-                    "Cleaner data for processing"
-                ]
-            },
-            "example_use_cases": {
-                "yournews_site": {
-                    "url": "https://yournewssite.lk/hot-news/",
-                    "config": {
-                        "array_selectors": {
-                            "news_stories": {
-                                "selector": ".news-story",
-                                "sub_selectors": {
-                                    "title": "h2 a",
-                                    "summary": "p",
-                                    "date": ".comments span",
-                                    "link": "h2 a"
-                                },
-                                "limit": 10
-                            }
-                        },
-                        "exclude_selectors": [".comments script"],
-                        "format": "structured"
-                    },
-                    "expected_improvement": "Duplicate news items automatically removed"
-                },
-                "product_listings": {
-                    "description": "E-commerce product extraction with deduplication",
-                    "config": {
-                        "array_selectors": {
-                            "products": {
-                                "selector": ".product-item",
-                                "sub_selectors": {
-                                    "name": ".product-title",
-                                    "price": ".price",
-                                    "rating": ".rating",
-                                    "availability": ".stock-status"
-                                }
-                            }
-                        }
-                    },
-                    "expected_improvement": "Duplicate products filtered out automatically"
-                },
-                "social_media_posts": {
-                    "description": "Social media feed extraction with deduplication",
-                    "config": {
-                        "array_selectors": {
-                            "posts": {
-                                "selector": ".post",
-                                "sub_selectors": {
-                                    "content": ".post-content",
-                                    "author": ".author-name",
-                                    "timestamp": ".post-date",
-                                    "likes": ".like-count"
-                                }
-                            }
-                        }
-                    },
-                    "expected_improvement": "Duplicate or similar posts removed"
-                }
-            },
-            "response_structure": {
-                "arrays": {
-                    "selector_name": {
-                        "selector": "CSS selector used",
-                        "items": [
-                            {
-                                "index": 0,
-                                "main_content": "Unique main text content",
-                                "title": "Extracted title",
-                                "summary": "Extracted summary",
-                                "word_count": 25,
-                                "char_count": 150
-                            }
-                        ],
-                        "count": "Number of unique items found",
-                        "deduplication_applied": "Boolean indicating if duplicates were removed"
-                    }
-                },
-                "deduplication_stats": {
-                    "total_items_before_dedup": "Original item count",
-                    "total_items_after_dedup": "Final unique item count",
-                    "items_removed": "Number of duplicates removed",
-                    "deduplication_ratio": "Percentage of duplicates removed"
-                }
-            },
-            "testing_deduplication": {
-                "before_fix": "Arrays contained duplicate items and repeated content",
-                "after_fix": "Only unique items with clean content",
-                "test_indicators": [
-                    "Check 'deduplication_applied' flag in array data",
-                    "Compare 'count' vs original element count",
-                    "Look for 'deduplication_stats' in metadata",
-                    "Verify no repeated sentences in main_content"
-                ]
-            },
-            "infinitude_integration": {
-                "next_js_example": {
-                    "description": "Perfect for your Next.js 14 SAAS projects",
-                    "use_cases": [
-                        "News aggregation with clean, unique articles",
-                        "Product comparison with deduplicated listings",
-                        "Content curation with quality filtering",
-                        "Social media monitoring with unique posts"
-                    ]
-                },
-                "saas_benefits": [
-                    "Higher quality data extraction",
-                    "Reduced storage requirements",
-                    "Better user experience",
-                    "More accurate analytics"
-                ]
-            },
-            "status": "healthy",
-            "service": "Array-Based Content Extraction API with Advanced Deduplication"
-        })
-    except Exception as e:
-        return error_response(f"Array extraction test failed: {str(e)}", 500)
-
-@api_v1.route('/content/array/demo', methods=['POST'])
-@apply_rate_limit("5 per minute")
-def demo_array_extraction():
-    """
-    Demo endpoint with pre-configured examples for common sites with deduplication
-    
-    Request body:
-    {
-        "site_type": "yournews_site",
-        "url": "https://yournewssite.lk/hot-news/",
-        "limit": 5
-    }
-    """
-    try:
-        data = request.get_json()
+                    
+                    # Add sub-selector fields
+                    for key, value in item.items():
+                        if key not in ['index', 'main_content', 'word_count', 'char_count']:
+                            if isinstance(value, list) and value:
+                                formatted_item[key] = value[0]
+                            elif value:
+                                formatted_item[key] = str(value)
+                    
+                    # Ensure all sub_selectors are present
+                    for sub_key in sub_selectors.keys():
+                        if sub_key not in formatted_item:
+                            formatted_item[sub_key] = ''
+                    
+                    formatted_items.append(formatted_item)
+                
+                batch_results.append({
+                    'url': url,
+                    'success': True,
+                    'total_found': len(formatted_items),
+                    'items': formatted_items,  # Order preserved for each site
+                    'order_preserved': True,
+                    'urls_absolute': True
+                })
+                
+                total_items += len(formatted_items)
+                successful_extractions += 1
+                
+            else:
+                batch_results.append({
+                    'url': url,
+                    'success': False,
+                    'error': result.error if result else "Extraction failed",
+                    'total_found': 0,
+                    'items': []
+                })
         
-        if not data:
-            return error_response("Request body required", 400)
+        total_time = time.time() - start_time
         
-        site_type = data.get('site_type', '')
-        url = data.get('url', '')
-        limit = min(data.get('limit', 10), 20)
-        
-        if not site_type or not url:
-            return error_response("site_type and url are required", 400)
-        
-        # Pre-configured selector templates with deduplication awareness
-        selector_templates = {
-            'yournews_site': {
-                'array_selectors': {
-                    'news_stories': {
-                        'selector': '.news-story',
-                        'sub_selectors': {
-                            'title': 'h2 a',
-                            'summary': 'p',
-                            'date': '.comments span',
-                            'link': 'h2 a'
-                        },
-                        'limit': limit
-                    }
-                },
-                'exclude_selectors': ['.comments script', '.intensedebate'],
-                'format': 'structured'
-            },
-            'generic_news': {
-                'array_selectors': {
-                    'articles': {
-                        'selector': '.article, .news-item, .post',
-                        'sub_selectors': {
-                            'title': 'h1, h2, h3, .title',
-                            'content': 'p, .content, .excerpt',
-                            'date': '.date, .timestamp, time'
-                        },
-                        'limit': limit
-                    }
-                },
-                'format': 'structured'
-            },
-            'generic_products': {
-                'array_selectors': {
-                    'products': {
-                        'selector': '.product, .product-item, .item',
-                        'sub_selectors': {
-                            'name': '.product-name, .title, h3',
-                            'price': '.price, .cost, .amount',
-                            'description': '.description, .summary'
-                        },
-                        'limit': limit
-                    }
-                },
-                'format': 'structured'
-            },
-            'generic_search': {
-                'array_selectors': {
-                    'results': {
-                        'selector': '.result, .search-result, .listing',
-                        'sub_selectors': {
-                            'title': 'h3, .title, .heading',
-                            'snippet': '.snippet, .description, .summary',
-                            'url': 'a, .link'
-                        },
-                        'limit': limit
-                    }
-                },
-                'format': 'structured'
+        response_data = {
+            'total_urls_processed': len(urls),
+            'successful_extractions': successful_extractions,
+            'failed_extractions': len(urls) - successful_extractions,
+            'total_items_found': total_items,
+            'extraction_time': round(total_time, 2),
+            'results': batch_results,
+            'config_used': {
+                'selector': main_selector,
+                'sub_selectors': list(sub_selectors.keys()),
+                'limit_per_url': limit,
+                'order_preserved': True,
+                'urls_absolute': True
             }
         }
         
-        if site_type not in selector_templates:
-            return error_response(f"Unknown site_type. Available: {list(selector_templates.keys())}", 400)
+        return success_response(response_data)
         
-        config = selector_templates[site_type]
-        
-        # Run the extraction with deduplication
-        crawler_service = ArrayBasedCrawlerService(current_app.config)
-        
-        try:
-            result = safe_async_run(
-                crawler_service.crawl_array_content(
-                    url, 
-                    config['array_selectors'], 
-                    config.get('exclude_selectors', []), 
-                    config.get('format', 'structured')
-                ),
-                timeout=30
-            )
-        except Exception as e:
-            return error_response(f"Demo extraction failed: {str(e)}", 500)
-        
-        if result and result.success:
-            response_data = result.to_dict()
-            if 'arrays' in result.metadata:
-                response_data['arrays'] = result.metadata['arrays']
-            
-            # Add demo info with deduplication results
-            demo_info = {
-                'site_type': site_type,
-                'template_used': config,
-                'extraction_successful': True,
-                'deduplication_summary': {}
-            }
-            
-            # Add deduplication summary for each array
-            if 'arrays' in result.metadata:
-                for name, data in result.metadata['arrays'].items():
-                    demo_info['deduplication_summary'][name] = {
-                        'items_found': data.get('count', 0),
-                        'deduplication_applied': data.get('deduplication_applied', False),
-                        'quality_improved': data.get('deduplication_applied', False)
-                    }
-            
-            response_data['demo_info'] = demo_info
-            
-            return success_response(response_data)
-        else:
-            return error_response(result.error if result else "Demo extraction failed", 400)
-            
     except Exception as e:
-        current_app.logger.error(f"Demo extraction error: {str(e)}")
-        return error_response("Demo extraction failed", 500)
+        current_app.logger.error(f"Batch array extraction error: {str(e)}")
+        return error_response("Batch extraction failed", 500)
+
+# Simple demo endpoint for quick testing
+@api_v1.route('/content/array/demo', methods=['GET'])
+@apply_rate_limit("30 per minute")
+def demo_array_extraction():
+    """Demo endpoint showing proper usage with order preservation and absolute URLs"""
+    try:
+        return success_response({
+            "message": "Array Content Extraction API - Order Preserved & Absolute URLs",
+            "description": "Extract repeated elements maintaining top-to-bottom order with absolute image/link URLs",
+            "key_features": {
+                "order_preservation": "Items returned in same order as they appear on webpage (index 0 = top item)",
+                "absolute_urls": "All image and link URLs converted to absolute URLs",
+                "deduplication": "Removes duplicate content while preserving order",
+                "flexible_selectors": "Support for custom CSS selectors for any content type"
+            },
+            "endpoints": {
+                "main": {
+                    "url": "POST /api/v1/content/array",
+                    "description": "Custom extraction with your own sub-selectors"
+                },
+                "simple": {
+                    "url": "POST /api/v1/content/array/simple", 
+                    "description": "Auto-detect common fields (title, content, image, link, date, author)"
+                },
+                "batch": {
+                    "url": "POST /api/v1/content/array/batch",
+                    "description": "Extract from multiple URLs"
+                }
+            },
+            "example_request": {
+                "url": "https://news-site.com",
+                "selector": ".news-item",
+                "config": {
+                    "sub_selectors": {
+                        "title": "h2 a",
+                        "summary": "p",
+                        "image": "img",
+                        "date": ".date",
+                        "link": "a"
+                    },
+                    "limit": 10
+                }
+            },
+            "example_response_item": {
+                "index": 0,
+                "title": "Latest News Title",
+                "summary": "News summary...",
+                "image": "https://news-site.com/images/news.jpg",
+                "date": "2024-01-15",
+                "link": "https://news-site.com/news/latest",
+                "main_content": "Full article content...",
+                "word_count": 150,
+                "note": "index 0 = top item on page, URLs are absolute"
+            },
+            "python_usage": '''
+import requests
+
+# Extract news articles in order
+response = requests.post('http://localhost:5014/api/v1/content/array', json={
+    "url": "https://news-site.com",
+    "selector": ".news-item",
+    "config": {
+        "sub_selectors": {
+            "title": "h2 a",
+            "summary": "p",
+            "image": "img",
+            "link": "a"
+        }
+    }
+})
+
+data = response.json()
+if data['success']:
+    for item in data['data']['items']:
+        print(f"Position {item['index']}: {item['title']}")
+        print(f"Image: {item['image']}")  # Absolute URL
+        print(f"Link: {item['link']}")    # Absolute URL
+            ''',
+            "order_guarantee": "Items always returned in top-to-bottom order as they appear on the webpage",
+            "url_guarantee": "All image and link URLs converted to absolute URLs for direct usage",
+            "status": "ready"
+        })
+    except Exception as e:
+        return error_response(f"Demo failed: {str(e)}", 500)
