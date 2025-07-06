@@ -493,7 +493,7 @@ def test_array_extraction():
                 ]
             },
             "example_use_cases": {
-                "adaderana_news": {
+                "yournews_site": {
                     "url": "https://yournewssite.lk/hot-news/",
                     "config": {
                         "array_selectors": {
@@ -614,7 +614,7 @@ def demo_array_extraction():
     
     Request body:
     {
-        "site_type": "adaderana_news",
+        "site_type": "yournews_site",
         "url": "https://yournewssite.lk/hot-news/",
         "limit": 5
     }
@@ -634,7 +634,7 @@ def demo_array_extraction():
         
         # Pre-configured selector templates with deduplication awareness
         selector_templates = {
-            'adaderana_news': {
+            'yournews_site': {
                 'array_selectors': {
                     'news_stories': {
                         'selector': '.news-story',
